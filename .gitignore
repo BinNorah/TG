@@ -1,0 +1,8 @@
+data/
+sessions/
+.env
+__pycache__/
+*.pyc
+*.session
+*.session-journal
+mensajes_flamie.db
