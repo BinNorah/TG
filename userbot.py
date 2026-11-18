@@ -357,7 +357,7 @@ def iniciar_userbot():
     try:
         print("Iniciando el Recepcionista (Cuenta Personal)...")
         print(f"Ignorando mensajes del bot ID: {BOT_ID}")
-        print(f"MI_ID={MI_ID}, BOT_TOKEN={BOT_TOKEN[:20]}...")
+        print("Credenciales requeridas cargadas.")
         app.run()  # Ejecuta app.start() + idle()
         
     except Exception as e:
