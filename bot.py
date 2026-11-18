@@ -160,6 +160,37 @@ usuarios_notificados_cache = cargar_usuarios_notificados()
 # 4. BOT
 # ==========================================
 bot = telebot.TeleBot(TOKEN)
+_gif_ids = {}
+
+
+def enviar_animacion_cacheada(chat_id, nombre_archivo, caption=None, parse_mode=None,
+                              reply_markup=None, reply_to_message_id=None):
+    ruta = BASE_DIR / nombre_archivo
+    file_id = _gif_ids.get(nombre_archivo)
+    opciones = {
+        "caption": caption,
+        "parse_mode": parse_mode,
+        "reply_markup": reply_markup,
+        "reply_to_message_id": reply_to_message_id,
+    }
+    opciones = {clave: valor for clave, valor in opciones.items() if valor is not None}
+    if file_id:
+        try:
+            return bot.send_animation(chat_id, file_id, **opciones)
+        except Exception:
+            _gif_ids.pop(nombre_archivo, None)
+    try:
+        with ruta.open("rb") as archivo:
+            enviado = bot.send_animation(chat_id, archivo, **opciones)
+        if enviado and enviado.animation:
+            _gif_ids[nombre_archivo] = enviado.animation.file_id
+        return enviado
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
 def comandos_personalizados_menu():
     filas = query("SELECT command FROM custom_commands ORDER BY command LIMIT 40")
     return [telebot.types.BotCommand(str(fila[0]), "Comando personalizado") for fila in filas]
@@ -398,7 +429,13 @@ def cmd_start(message):
         "Bienvenido. Usa /help para abrir los paneles de funciones o /info "
         "para consultar los datos de este chat."
     )
-    bot.reply_to(message, texto, reply_markup=teclado_ayuda(message, user_id=user_id))
+    teclado = teclado_ayuda(message, user_id=user_id)
+    enviado = enviar_animacion_cacheada(
+        message.chat.id, "FlamieBot.gif", caption=texto,
+        reply_markup=teclado, reply_to_message_id=message.message_id,
+    )
+    if enviado is None:
+        bot.reply_to(message, texto, reply_markup=teclado)
 
 
 @bot.message_handler(commands=['help'])
@@ -415,11 +452,14 @@ def cmd_cmds(message):
     if message.chat.type != "private":
         bot.reply_to(message, "Solicita la activación en el chat privado del bot.")
         return
-    bot.reply_to(
-        message,
-        "Selecciona Activación para indicar la plataforma y enviar tu solicitud.",
-        reply_markup=teclado_cmds(),
+    texto = "Selecciona Activacion para indicar la plataforma y enviar tu solicitud."
+    teclado = teclado_cmds()
+    enviado = enviar_animacion_cacheada(
+        message.chat.id, "FlamieCmds.gif", caption=texto,
+        reply_markup=teclado, reply_to_message_id=message.message_id,
     )
+    if enviado is None:
+        bot.reply_to(message, texto, reply_markup=teclado)
 
 
 @bot.message_handler(commands=['activar'])
