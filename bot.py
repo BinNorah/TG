@@ -6,6 +6,9 @@ from pathlib import Path
 import html
 import threading
 import google.genai as genai
+import io
+import re
+import time
 
 # ==========================================
 # 1. CREDENCIALES Y CONFIGURACION
@@ -40,7 +43,7 @@ MI_ID = int(_require_env("TELEGRAM_OWNER_ID"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # DATA_DIR se puede sobreescribir con variable de entorno para Railway Volume
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "mensajes_flamie.db"
 
 # ==========================================
@@ -70,8 +73,9 @@ def init_db():
     # Agregar columna hora si no existe (compatibilidad con DB vieja)
     try:
         cur.execute("ALTER TABLE mensajes ADD COLUMN hora TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # Ya existe, no hay problema
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name: hora" not in str(exc).lower():
+            raise
 
     cur.execute('''
         CREATE TABLE IF NOT EXISTS alertas_directas (
@@ -85,8 +89,9 @@ def init_db():
     ''')
     try:
         cur.execute("ALTER TABLE alertas_directas ADD COLUMN hora TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name: hora" not in str(exc).lower():
+            raise
 
     # Tabla para recordar a quien ya se le envio la respuesta automatica
     # Persiste entre reinicios del bot
@@ -100,6 +105,29 @@ def init_db():
         CREATE TABLE IF NOT EXISTS config (
             clave TEXT PRIMARY KEY,
             valor TEXT
+        )
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS chat_users (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    ''')
+    cur.execute('''
+        CREATE INDEX IF NOT EXISTS idx_chat_users_username
+        ON chat_users (chat_id, username)
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS custom_commands (
+            command TEXT PRIMARY KEY,
+            response TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -124,6 +152,38 @@ usuarios_notificados_cache = cargar_usuarios_notificados()
 # ==========================================
 bot = telebot.TeleBot(TOKEN)
 usuarios_silenciados = set()
+
+
+def registrar_usuarios_vistos(updates):
+    """Guarda usuarios observados para poder resolver nombres de usuario."""
+    rows = []
+    for update in updates:
+        message = getattr(update, "message", None)
+        if not message or message.chat.type == "private" or not message.from_user:
+            continue
+        user = message.from_user
+        rows.append((message.chat.id, user.id, user.username, user.first_name or ""))
+    if not rows:
+        return
+    try:
+        con = get_db()
+        try:
+            con.executemany(
+                """INSERT INTO chat_users (chat_id, user_id, username, first_name, updated_at)
+                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                     username=excluded.username, first_name=excluded.first_name,
+                     updated_at=CURRENT_TIMESTAMP""",
+                rows,
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as exc:
+        print(f"[ERROR] No se pudieron registrar los usuarios del chat: {exc}")
+
+
+bot.set_update_listener(registrar_usuarios_vistos)
 
 # ==========================================
 # 4.1 CACHE DE ANIMACIONES (GIFs)
@@ -704,6 +764,383 @@ def recibir_documento(message):
     )
     bot.reply_to(message, "✦ Archivo recibido. Sera revisado.")
 
+
+# ==========================================
+# 11.1 MODERACION Y ADMINISTRACION DE CHATS
+# ==========================================
+MODERATION_RE = re.compile(
+    r"^\s*[/.,]\s*(ban|mute|restrict|kick|promote)(?:@[A-Za-z0-9_]+)?(?:\s+|$)(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+PERMISOS_ADMIN = {
+    "change_info": "can_change_info",
+    "post_messages": "can_post_messages",
+    "edit_messages": "can_edit_messages",
+    "delete_messages": "can_delete_messages",
+    "invite_users": "can_invite_users",
+    "restrict_members": "can_restrict_members",
+    "pin_messages": "can_pin_messages",
+    "promote_members": "can_promote_members",
+    "manage_chat": "can_manage_chat",
+    "manage_video_chats": "can_manage_video_chats",
+    "manage_voice_chats": "can_manage_voice_chats",
+    "manage_topics": "can_manage_topics",
+    "post_stories": "can_post_stories",
+    "edit_stories": "can_edit_stories",
+    "delete_stories": "can_delete_stories",
+}
+
+
+def usuario_es_admin(chat_id, user_id):
+    if user_id == MI_ID:
+        return True
+    miembro = bot.get_chat_member(chat_id, user_id)
+    return miembro.status in ("administrator", "creator")
+
+
+def resolver_objetivo(message, args):
+    if message.reply_to_message and message.reply_to_message.from_user:
+        return message.reply_to_message.from_user.id, args
+    if not args:
+        return None, args
+    target, _, remaining = args.partition(" ")
+    if target.isdecimal():
+        return int(target), remaining.strip()
+    if target.startswith("@"):
+        username = target[1:].lstrip("@").lower()
+        rows = query(
+            "SELECT user_id FROM chat_users WHERE chat_id=? AND lower(username)=? "
+            "ORDER BY updated_at DESC LIMIT 2",
+            (message.chat.id, username),
+        )
+        if len(rows) == 1:
+            return int(rows[0][0]), remaining.strip()
+        if len(rows) > 1:
+            raise ValueError("Ese nombre de usuario aparece asociado a varios usuarios.")
+        raise ValueError(
+            "No conozco a ese usuario en este chat. Debe haber enviado un mensaje "
+            "que el bot haya recibido o debes responder a uno de sus mensajes."
+        )
+    raise ValueError("Indica un ID numerico, un @usuario conocido o responde a su mensaje.")
+
+
+def duracion_a_segundos(texto):
+    coincidencia = re.fullmatch(r"(\d+)(s|m|h|d)", texto.strip().lower())
+    if not coincidencia:
+        return None
+    cantidad = int(coincidencia.group(1))
+    multiplicador = {"s": 1, "m": 60, "h": 3600, "d": 86400}[coincidencia.group(2)]
+    total = cantidad * multiplicador
+    if total < 30 or total > 366 * 86400:
+        raise ValueError("La duracion debe estar entre 30 segundos y 366 dias.")
+    return total
+
+
+def procesar_comando_moderacion(message):
+    coincidencia = MODERATION_RE.match(message.text or "")
+    if not coincidencia:
+        return
+    comando = coincidencia.group(1).lower()
+    args = coincidencia.group(2).strip()
+    if message.chat.type == "private":
+        bot.reply_to(message, "Este comando debe usarse dentro del grupo o canal.")
+        return
+
+    try:
+        if not usuario_es_admin(message.chat.id, message.from_user.id):
+            bot.reply_to(message, "Solo los administradores del chat pueden usar este comando.")
+            return
+        objetivo, resto = resolver_objetivo(message, args)
+        if objetivo is None:
+            bot.reply_to(
+                message,
+                "Uso: responde a un mensaje o indica /" + comando + " ID o @usuario.",
+            )
+            return
+        if objetivo == message.from_user.id:
+            bot.reply_to(message, "No puedes aplicar esta accion sobre ti mismo.")
+            return
+
+        if comando == "ban":
+            bot.ban_chat_member(message.chat.id, objetivo)
+            respuesta = f"Usuario {objetivo} baneado."
+        elif comando == "kick":
+            bot.ban_chat_member(message.chat.id, objetivo)
+            bot.unban_chat_member(message.chat.id, objetivo)
+            respuesta = f"Usuario {objetivo} expulsado."
+        elif comando in ("mute", "restrict"):
+            duracion = duracion_a_segundos(resto.split()[0]) if resto.split() else None
+            hasta = int(time.time()) + duracion if duracion else None
+            permisos = telebot.types.ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            )
+            bot.restrict_chat_member(
+                message.chat.id, objetivo, until_date=hasta, permissions=permisos
+            )
+            sufijo = f" por {resto.split()[0]}" if duracion else " sin limite de tiempo"
+            respuesta = f"Usuario {objetivo} restringido{sufijo}."
+        else:
+            derechos = {nombre_api: False for nombre_api in PERMISOS_ADMIN.values()}
+            palabras = [p.strip().lower() for p in resto.replace(",", " ").split()]
+            for palabra in palabras:
+                normalizado = palabra.removeprefix("can_")
+                if normalizado not in PERMISOS_ADMIN:
+                    bot.reply_to(
+                        message,
+                        "Permisos validos: " + ", ".join(sorted(PERMISOS_ADMIN)) + ".",
+                    )
+                    return
+                derechos[PERMISOS_ADMIN[normalizado]] = True
+            if not palabras:
+                derechos["can_manage_chat"] = True
+            bot.promote_chat_member(message.chat.id, objetivo, **derechos)
+            lista = ", ".join(k.removeprefix("can_") for k in derechos)
+            respuesta = f"Usuario {objetivo} promovido. Permisos: {lista}."
+        bot.reply_to(message, respuesta)
+    except ValueError as exc:
+        bot.reply_to(message, str(exc))
+    except Exception as exc:
+        bot.reply_to(message, f"No se pudo completar la accion: {html.escape(str(exc))}")
+
+
+@bot.message_handler(func=lambda m: bool(m.text and MODERATION_RE.match(m.text)))
+def comandos_moderacion(message):
+    procesar_comando_moderacion(message)
+
+
+# ==========================================
+# 11.2 COMANDOS PERSONALIZADOS PERSISTENTES
+# ==========================================
+COMANDOS_RESERVADOS = {
+    "start", "cmds", "reload", "silenciar", "borrar", "stats", "hoy",
+    "resumen", "setdinamica", "enddinamica", "me", "estado", "dinamica",
+    "ban", "mute", "restrict", "kick", "promote", "q", "addcmd",
+    "delcmd", "listcmd",
+}
+COMANDO_SLASH_RE = re.compile(r"^\s*/([A-Za-z][A-Za-z0-9_]{0,31})(?:@[A-Za-z0-9_]+)?(?:\s+|$)(.*)$", re.DOTALL)
+
+
+def comando_personalizado(message):
+    coincidencia = COMANDO_SLASH_RE.match(message.text or "")
+    if not coincidencia:
+        return False
+    nombre = coincidencia.group(1).lower()
+    if nombre in {"addcmd", "delcmd", "listcmd"}:
+        return True
+    if nombre in COMANDOS_RESERVADOS:
+        return False
+    return bool(query("SELECT 1 FROM custom_commands WHERE command=?", (nombre,)))
+
+
+def procesar_comando_personalizado(message):
+    coincidencia = COMANDO_SLASH_RE.match(message.text or "")
+    if not coincidencia:
+        return
+    nombre = coincidencia.group(1).lower()
+    argumentos = coincidencia.group(2).strip()
+    if nombre in {"addcmd", "delcmd", "listcmd"}:
+        if not message.from_user or message.from_user.id != MI_ID:
+            bot.reply_to(message, "Solo el propietario puede administrar comandos personalizados.")
+            return
+        if nombre == "addcmd":
+            if "|" not in argumentos:
+                bot.reply_to(message, "Uso: /addcmd nombre | respuesta")
+                return
+            comando, respuesta = (parte.strip() for parte in argumentos.split("|", 1))
+            comando = comando.lstrip("/").lower()
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", comando):
+                bot.reply_to(message, "El nombre debe iniciar con una letra y contener solo letras, numeros o guion bajo.")
+                return
+            if comando in COMANDOS_RESERVADOS:
+                bot.reply_to(message, "Ese nombre esta reservado por un comando del sistema.")
+                return
+            if not respuesta:
+                bot.reply_to(message, "La respuesta no puede estar vacia.")
+                return
+            con = get_db()
+            try:
+                con.execute(
+                    """INSERT INTO custom_commands (command, response) VALUES (?, ?)
+                       ON CONFLICT(command) DO UPDATE SET
+                         response=excluded.response, updated_at=CURRENT_TIMESTAMP""",
+                    (comando, respuesta),
+                )
+                con.commit()
+            finally:
+                con.close()
+            bot.reply_to(message, f"Comando /{comando} guardado y disponible.")
+            return
+        if nombre == "delcmd":
+            comando = argumentos.lstrip("/").lower().split(maxsplit=1)[0] if argumentos else ""
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", comando):
+                bot.reply_to(message, "Uso: /delcmd nombre")
+                return
+            con = get_db()
+            try:
+                cursor = con.execute("DELETE FROM custom_commands WHERE command=?", (comando,))
+                con.commit()
+                eliminado = cursor.rowcount
+            finally:
+                con.close()
+            bot.reply_to(message, f"Comando /{comando} eliminado." if eliminado else f"No existe /{comando}.")
+            return
+        filas = query("SELECT command FROM custom_commands ORDER BY command")
+        lista = "\n".join("/" + str(fila[0]) for fila in filas) if filas else "No hay comandos personalizados."
+        bot.reply_to(message, lista)
+        return
+
+    filas = query("SELECT response FROM custom_commands WHERE command=?", (nombre,))
+    if not filas:
+        return
+    respuesta = str(filas[0][0])
+    respuesta = respuesta.replace("{args}", argumentos)
+    respuesta = respuesta.replace("{user}", str(message.from_user.id if message.from_user else ""))
+    respuesta = respuesta.replace("{first_name}", message.from_user.first_name or "" if message.from_user else "")
+    bot.reply_to(message, respuesta)
+
+
+@bot.message_handler(func=comando_personalizado)
+def comandos_personalizados(message):
+    procesar_comando_personalizado(message)
+
+
+# ==========================================
+# 11.3 STICKER DE CITA
+# ==========================================
+def _fuente_cita(ImageFont, tamano):
+    candidatos = [
+        "DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]
+    for ruta in candidatos:
+        try:
+            return ImageFont.truetype(ruta, tamano)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _ajustar_lineas(draw, texto, fuente, ancho):
+    palabras = texto.split()
+    lineas = []
+    actual = ""
+    for palabra in palabras:
+        prueba = f"{actual} {palabra}".strip()
+        if actual and draw.textbbox((0, 0), prueba, font=fuente)[2] > ancho:
+            lineas.append(actual)
+            actual = palabra
+        else:
+            actual = prueba
+    if actual:
+        lineas.append(actual)
+    return lineas
+
+
+def crear_sticker_cita(texto, nombre, foto_bytes=None):
+    from PIL import Image, ImageDraw, ImageFont
+
+    lienzo = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(lienzo)
+    draw.rounded_rectangle((10, 10, 502, 502), radius=34, fill=(35, 39, 47, 255))
+
+    avatar = None
+    if foto_bytes:
+        try:
+            foto_bytes.seek(0)
+            avatar = Image.open(foto_bytes).convert("RGB")
+            lado = min(avatar.size)
+            izquierda = (avatar.width - lado) // 2
+            arriba = (avatar.height - lado) // 2
+            avatar = avatar.crop((izquierda, arriba, izquierda + lado, arriba + lado)).resize((58, 58))
+            mascara = Image.new("L", (58, 58), 0)
+            ImageDraw.Draw(mascara).ellipse((0, 0, 57, 57), fill=255)
+            lienzo.paste(avatar, (30, 29), mascara)
+        except Exception:
+            avatar = None
+    if avatar is None:
+        inicial = (nombre.strip()[:1] or "?").upper()
+        draw.ellipse((30, 29, 88, 87), fill=(88, 101, 242, 255))
+        draw.text((49, 39), inicial, font=_fuente_cita(ImageFont, 28), fill=(255, 255, 255, 255))
+
+    fuente_nombre = _fuente_cita(ImageFont, 23)
+    nombre_visible = nombre.strip()[:34] or "Usuario"
+    draw.text((104, 31), nombre_visible, font=fuente_nombre, fill=(255, 255, 255, 255))
+    draw.line((30, 105, 482, 105), fill=(76, 82, 94, 255), width=2)
+
+    limpio = " ".join(texto.split())
+    fuente_texto = None
+    lineas = []
+    for tamano in range(27, 15, -1):
+        candidata = _fuente_cita(ImageFont, tamano)
+        lineas_candidatas = _ajustar_lineas(draw, limpio, candidata, 432)
+        if len(lineas_candidatas) <= 18 and len(lineas_candidatas) * (tamano + 7) <= 350:
+            fuente_texto, lineas = candidata, lineas_candidatas
+            break
+    if fuente_texto is None:
+        fuente_texto = _fuente_cita(ImageFont, 16)
+        lineas = _ajustar_lineas(draw, limpio, fuente_texto, 432)
+        lineas = lineas[:18]
+        if lineas:
+            lineas[-1] = lineas[-1].rstrip(".,;:!? ") + "..."
+
+    y = 128
+    for linea in lineas:
+        draw.text((40, y), linea, font=fuente_texto, fill=(239, 241, 245, 255))
+        y += 20 if fuente_texto.size <= 16 else fuente_texto.size + 7
+
+    salida = io.BytesIO()
+    lienzo.save(salida, format="WEBP", quality=88, method=6)
+    contenido = salida.getvalue()
+    if len(contenido) > 512 * 1024:
+        salida = io.BytesIO()
+        lienzo.save(salida, format="WEBP", quality=68, method=6)
+        contenido = salida.getvalue()
+    if len(contenido) > 512 * 1024:
+        raise ValueError("El sticker supera el limite de tamano de Telegram.")
+    salida = io.BytesIO(contenido)
+    salida.name = "quote.webp"
+    return salida
+
+
+@bot.message_handler(commands=["q"])
+def cmd_quote(message):
+    citado = message.reply_to_message
+    if not citado or not citado.text:
+        bot.reply_to(message, "Responde con /q a un mensaje de texto para crear el sticker.")
+        return
+    try:
+        usuario = citado.from_user
+        nombre = " ".join(
+            parte for parte in [usuario.first_name, usuario.last_name] if parte
+        ) if usuario else "Usuario"
+        foto = None
+        if usuario:
+            try:
+                fotos = bot.get_user_profile_photos(usuario.id, limit=1)
+                if fotos.total_count and fotos.photos:
+                    archivo = bot.get_file(fotos.photos[0][-1].file_id)
+                    foto = io.BytesIO(bot.download_file(archivo.file_path))
+            except Exception:
+                foto = None
+        sticker = crear_sticker_cita(citado.text, nombre, foto)
+        bot.send_sticker(message.chat.id, sticker, reply_to_message_id=message.message_id)
+    except ImportError:
+        bot.reply_to(message, "No esta instalada Pillow. Actualiza las dependencias del bot.")
+    except Exception as exc:
+        bot.reply_to(message, f"No se pudo crear el sticker: {html.escape(str(exc))}")
+
 # Estado de espera de codigo por usuario: {user_id: plataforma_detectada_o_None}
 esperando_codigo = {}
 
@@ -716,6 +1153,10 @@ esperando_plataforma = set()
 # ==========================================
 @bot.message_handler(func=lambda m: True)
 def guardaespaldas(message):
+    # Los comandos de grupo se manejan por separado; no deben pasar por el
+    # flujo privado de recepción y reenvío de mensajes.
+    if message.chat.type != "private":
+        return
     if message.chat.id == MI_ID:
         bot.send_message(MI_ID, "Comando no reconocido. Usa /cmds para ver las opciones.")
         return
