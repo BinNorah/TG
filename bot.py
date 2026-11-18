@@ -325,7 +325,14 @@ def callback_ayuda(call):
     texto = texto_panel_ayuda(panel, user_id, call.message.chat.id, call.message.chat.type)
     markup = teclado_ayuda(call.message, user_id=user_id, panel=panel)
     try:
-        bot.edit_message_text(texto, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        if getattr(call.message, "animation", None):
+            bot.edit_message_caption(
+                caption=texto, chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=markup,
+            )
+        else:
+            bot.edit_message_text(texto, call.message.chat.id, call.message.message_id, reply_markup=markup)
         bot.answer_callback_query(call.id)
     except Exception:
         bot.answer_callback_query(call.id, "No se pudo abrir este panel.")
