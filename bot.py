@@ -424,18 +424,16 @@ def query(sql, params=()):
 # ==========================================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    user_id = message.from_user.id if message.from_user else 0
     texto = (
         "Bienvenido. Usa /help para abrir los paneles de funciones o /info "
         "para consultar los datos de este chat."
     )
-    teclado = teclado_ayuda(message, user_id=user_id)
     enviado = enviar_animacion_cacheada(
         message.chat.id, "FlamieBot.gif", caption=texto,
-        reply_markup=teclado, reply_to_message_id=message.message_id,
+        reply_to_message_id=message.message_id,
     )
     if enviado is None:
-        bot.reply_to(message, texto, reply_markup=teclado)
+        bot.reply_to(message, texto)
 
 
 @bot.message_handler(commands=['help'])
