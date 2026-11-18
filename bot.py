@@ -216,7 +216,7 @@ def registrar_comandos_menu():
         ("q", "Crea un sticker de conversacion"), ("8ball", "Pregunta a la bola magica"),
         ("dado", "Lanza un dado"),
     ]
-    privados = publicos + [("cmds", "Solicita una activacion"), ("activar", "Solicita una activacion")]
+    privados = publicos + [("activar", "Solicita una activacion")]
     administradores = [
         ("ban", "Banea a un usuario"), ("tban", "Banea por tiempo"), ("kick", "Expulsa a un usuario"),
         ("mute", "Silencia a un usuario"), ("tmute", "Silencia por tiempo"), ("unmute", "Quita el silencio"),
@@ -290,7 +290,7 @@ def texto_panel_ayuda(panel, user_id, chat_id, chat_type):
         "stickers": "Stickers\n/q — Responde a un texto para crear sticker de cita.",
         "reglas": "Reglas\n/rules — Consulta las reglas de este grupo.",
         "utilidades": "Utilidades\n/chatlink — Obtiene el enlace del grupo.\n/staff — Lista administradores.\n/activar — Solicita una activacion en privado.",
-        "activacion": "Activacion\nUsa /activar o /cmds y sigue las instrucciones para enviar una solicitud.",
+        "activacion": "Activacion\nPulsa Activacion para indicar la plataforma y enviar una solicitud. Tambien puedes usar /activar.",
         "moderacion": "Moderacion\n/ban, /tban, /kick — Expulsar o banear.\n/mute, /tmute, /unmute, /restrict — Silencios y restricciones.\nResponde a un mensaje o indica ID o @usuario conocido.",
         "adminchat": "Administracion del grupo\n/promote y /demote — Gestion de administradores.\n/setrules y /clearrules — Gestion de reglas.\n/del, /pin, /unpin, /unallpin — Herramientas de mensajes.",
         "propietario": "Panel del propietario\n/limpiar — Limpia el historial privado en tu cuenta tras confirmacion.\n/addcmd nombre | respuesta, /delcmd nombre, /listcmd — Comandos personalizados.",
@@ -441,19 +441,8 @@ def cmd_start(message):
 @bot.message_handler(commands=['help'])
 def cmd_help(message):
     user_id = message.from_user.id if message.from_user else 0
-    bot.reply_to(
-        message,
-        texto_panel_ayuda("inicio", user_id, message.chat.id, message.chat.type),
-        reply_markup=teclado_ayuda(message, user_id=user_id),
-    )
-
-@bot.message_handler(commands=['cmds'])
-def cmd_cmds(message):
-    if message.chat.type != "private":
-        bot.reply_to(message, "Solicita la activación en el chat privado del bot.")
-        return
-    texto = "Selecciona Activacion para indicar la plataforma y enviar tu solicitud."
-    teclado = teclado_cmds()
+    texto = texto_panel_ayuda("inicio", user_id, message.chat.id, message.chat.type)
+    teclado = teclado_ayuda(message, user_id=user_id)
     enviado = enviar_animacion_cacheada(
         message.chat.id, "FlamieCmds.gif", caption=texto,
         reply_markup=teclado, reply_to_message_id=message.message_id,
@@ -688,14 +677,6 @@ def teclado_responder(user_id):
     )
     return markup
 
-def teclado_cmds():
-    """Botón de solicitud para el flujo de activación existente."""
-    markup = telebot.types.InlineKeyboardMarkup()
-    markup.row(
-        telebot.types.InlineKeyboardButton("Activación", callback_data="cmds:act")
-    )
-    return markup
-
 def pedir_plataforma_activacion(chat_id):
     """Pide al usuario que indique la plataforma cuando elige 'Activación'
     desde el menu de botones (en vez de escribirla directamente en el texto)."""
@@ -704,20 +685,6 @@ def pedir_plataforma_activacion(chat_id):
         "✦ ¿Para qué plataforma necesitas la activación?\n"
         "Escríbela (ej: Netflix, Disney+, HBO Max...)."
     )
-
-# ==========================================
-# 8.1 CALLBACK — MENU DE ACTIVACION
-# ==========================================
-@bot.callback_query_handler(func=lambda call: call.data == "cmds:act")
-def callback_menu_cmds(call):
-    chat_id = call.message.chat.id
-    uid = call.from_user.id
-    if call.message.chat.type != "private":
-        bot.answer_callback_query(call.id, "Solicita la activación en el chat privado del bot.")
-        return
-    bot.answer_callback_query(call.id, "Activación")
-    esperando_plataforma.add(uid)
-    pedir_plataforma_activacion(chat_id)
 
 # ==========================================
 # 8. CALLBACK — BOTON RESPONDER
@@ -1004,7 +971,7 @@ def comandos_moderacion(message):
 # 11.2 COMANDOS PERSONALIZADOS PERSISTENTES
 # ==========================================
 COMANDOS_RESERVADOS = {
-    "start", "help", "cmds", "activar", "info", "id", "limpiar", "q",
+    "start", "help", "activar", "info", "id", "limpiar", "q",
     "uinfo", "chatid", "chatlink", "staff", "rules", "sticker", "idsticker", "getsticker",
     "quiz", "8ball", "dado", "top", "ban", "tban", "mute", "tmute", "unmute",
     "restrict", "kick", "promote", "demote", "warn", "unwarn", "settitle", "setgtitle",
@@ -1230,7 +1197,7 @@ def cmd_quote(message):
 # Estado de espera de codigo por usuario: {user_id: plataforma_detectada_o_None}
 esperando_codigo = {}
 
-# Usuarios que eligieron el boton "Activacion" en /cmds y deben indicar
+# Usuarios que eligieron el boton "Activacion" en /help y deben indicar
 # todavia para que plataforma es (paso previo a esperando_codigo)
 esperando_plataforma = set()
 
