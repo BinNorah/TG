@@ -8,6 +8,7 @@ import threading
 import io
 import re
 import time
+import random
 
 # ==========================================
 # 1. CREDENCIALES Y CONFIGURACION
@@ -105,6 +106,39 @@ def init_db():
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS chat_settings (
+            chat_id INTEGER NOT NULL,
+            setting TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (chat_id, setting)
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS chat_rules (
+            chat_id INTEGER PRIMARY KEY,
+            rules TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS warnings (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS group_activity (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    ''')
 
     con.commit()
     con.close()
@@ -127,144 +161,143 @@ usuarios_notificados_cache = cargar_usuarios_notificados()
 # ==========================================
 bot = telebot.TeleBot(TOKEN)
 def comandos_personalizados_menu():
-    """Devuelve los comandos guardados para incluirlos en el menu de Telegram."""
-    filas = query("SELECT command FROM custom_commands ORDER BY command LIMIT 80")
-    return [
-        telebot.types.BotCommand(str(fila[0]), "Comando personalizado")
-        for fila in filas
-    ]
+    filas = query("SELECT command FROM custom_commands ORDER BY command LIMIT 40")
+    return [telebot.types.BotCommand(str(fila[0]), "Comando personalizado") for fila in filas]
+
+
+def usuario_puede_administrar(chat_id, chat_type, user_id):
+    if user_id == MI_ID:
+        return True
+    if chat_type == "private":
+        return False
+    try:
+        return bot.get_chat_member(chat_id, user_id).status in ("administrator", "creator")
+    except Exception:
+        return False
 
 
 def registrar_comandos_menu():
-    """Publica los comandos disponibles en el autocompletado de Telegram."""
-    comandos_base = [
-        telebot.types.BotCommand("start", "Inicia el bot"),
-        telebot.types.BotCommand("help", "Abre los paneles de ayuda"),
-        telebot.types.BotCommand("info", "Muestra informacion del chat y usuario"),
-        telebot.types.BotCommand("id", "Muestra identificadores de Telegram"),
-        telebot.types.BotCommand("q", "Crea un sticker de una conversacion"),
+    publicos = [
+        ("start", "Inicia el bot"), ("help", "Abre los paneles de funciones"),
+        ("info", "Muestra informacion del chat y usuario"), ("id", "Muestra identificadores"),
+        ("chatid", "Muestra el ID del chat"), ("chatlink", "Obtiene el enlace del grupo"),
+        ("staff", "Lista los administradores"), ("rules", "Consulta las reglas del grupo"),
+        ("q", "Crea un sticker de conversacion"), ("8ball", "Pregunta a la bola magica"),
+        ("dado", "Lanza un dado"),
     ]
-    comandos_privados = comandos_base + [
-        telebot.types.BotCommand("cmds", "Solicita una activacion"),
-        telebot.types.BotCommand("activar", "Solicita una activacion"),
-    ]
-    moderacion = [
-        telebot.types.BotCommand("ban", "Banea a un usuario del grupo"),
-        telebot.types.BotCommand("kick", "Expulsa a un usuario del grupo"),
-        telebot.types.BotCommand("mute", "Restringe a un usuario"),
-        telebot.types.BotCommand("restrict", "Restringe a un usuario"),
-        telebot.types.BotCommand("promote", "Promueve a un usuario"),
+    privados = publicos + [("cmds", "Solicita una activacion"), ("activar", "Solicita una activacion")]
+    administradores = [
+        ("ban", "Banea a un usuario"), ("tban", "Banea por tiempo"), ("kick", "Expulsa a un usuario"),
+        ("mute", "Silencia a un usuario"), ("tmute", "Silencia por tiempo"), ("unmute", "Quita el silencio"),
+        ("restrict", "Restringe a un usuario"), ("promote", "Promueve a un administrador"),
+        ("demote", "Retira el rol de administrador"), ("warn", "Advierte a un usuario"),
+        ("unwarn", "Retira una advertencia"),
+        ("del", "Borra el mensaje respondido"), ("pin", "Fija el mensaje respondido"),
+        ("unpin", "Desfija un mensaje"), ("unallpin", "Desfija todos los mensajes"),
+        ("setrules", "Define las reglas del grupo"), ("clearrules", "Elimina las reglas"),
     ]
     propietario = [
-        telebot.types.BotCommand("limpiar", "Limpia este historial con confirmacion"),
-        telebot.types.BotCommand("addcmd", "Crea o actualiza un comando"),
-        telebot.types.BotCommand("delcmd", "Elimina un comando personalizado"),
-        telebot.types.BotCommand("listcmd", "Lista comandos personalizados"),
+        ("limpiar", "Limpia este historial con confirmacion"),
+        ("addcmd", "Crea o actualiza un comando"), ("delcmd", "Elimina un comando personalizado"),
+        ("listcmd", "Lista comandos personalizados"),
     ]
     personalizados = comandos_personalizados_menu()
-    comandos_grupo = comandos_base + personalizados
-
+    convertir = lambda pares: [telebot.types.BotCommand(nombre, descripcion) for nombre, descripcion in pares]
+    comandos_publicos = convertir(publicos) + personalizados
+    comandos_privados = convertir(privados) + personalizados
+    comandos_admin = comandos_publicos + convertir(administradores)
+    comandos_propietario = comandos_privados + convertir(administradores) + convertir(propietario)
     try:
-        bot.set_my_commands(
-            comandos_privados + personalizados,
-            scope=telebot.types.BotCommandScopeAllPrivateChats(),
-        )
-        bot.set_my_commands(
-            comandos_grupo,
-            scope=telebot.types.BotCommandScopeAllGroupChats(),
-        )
-        bot.set_my_commands(
-            comandos_grupo + moderacion,
-            scope=telebot.types.BotCommandScopeAllChatAdministrators(),
-        )
-        bot.set_my_commands(
-            comandos_privados + propietario + personalizados,
-            scope=telebot.types.BotCommandScopeChat(chat_id=MI_ID),
-        )
+        bot.set_my_commands(comandos_privados, scope=telebot.types.BotCommandScopeAllPrivateChats())
+        bot.set_my_commands(comandos_publicos, scope=telebot.types.BotCommandScopeAllGroupChats())
+        bot.set_my_commands(comandos_admin, scope=telebot.types.BotCommandScopeAllChatAdministrators())
+        bot.set_my_commands(comandos_propietario, scope=telebot.types.BotCommandScopeChat(chat_id=MI_ID))
     except Exception:
         print("No se pudo actualizar el menu de comandos de Telegram.")
 
 
-def teclado_ayuda(message, panel="inicio"):
+def teclado_ayuda(message, user_id=None, panel="inicio"):
+    user_id = user_id or (message.from_user.id if message.from_user else 0)
+    chat_id = message.chat.id
+    chat_type = message.chat.type
+    es_admin = usuario_puede_administrar(chat_id, chat_type, user_id)
     markup = telebot.types.InlineKeyboardMarkup()
     if panel == "inicio":
         markup.row(
-            telebot.types.InlineKeyboardButton("Información", callback_data="help:info"),
-            telebot.types.InlineKeyboardButton("Moderación", callback_data="help:moderacion"),
+            telebot.types.InlineKeyboardButton("Informacion", callback_data="help:info"),
+            telebot.types.InlineKeyboardButton("Ocio", callback_data="help:ocio"),
         )
         markup.row(
-            telebot.types.InlineKeyboardButton("Activación", callback_data="help:activacion"),
             telebot.types.InlineKeyboardButton("Stickers", callback_data="help:stickers"),
+            telebot.types.InlineKeyboardButton("Reglas", callback_data="help:reglas"),
         )
-        if message.from_user and message.from_user.id == MI_ID:
+        markup.row(telebot.types.InlineKeyboardButton("Utilidades", callback_data="help:utilidades"))
+        if chat_type == "private":
+            markup.row(telebot.types.InlineKeyboardButton("Activacion", callback_data="help:activacion"))
+        if es_admin:
             markup.row(
-                telebot.types.InlineKeyboardButton("Administración personal", callback_data="help:propietario")
+                telebot.types.InlineKeyboardButton("Moderacion", callback_data="help:moderacion"),
+                telebot.types.InlineKeyboardButton("Administracion", callback_data="help:adminchat"),
             )
+            if user_id == MI_ID:
+                markup.row(telebot.types.InlineKeyboardButton("Propietario", callback_data="help:propietario"))
+        markup.row(telebot.types.InlineKeyboardButton("Cerrar", callback_data="help:cerrar"))
     else:
         markup.row(
-            telebot.types.InlineKeyboardButton("Volver", callback_data="help:inicio")
+            telebot.types.InlineKeyboardButton("Volver a paneles", callback_data="help:inicio"),
+            telebot.types.InlineKeyboardButton("Cerrar", callback_data="help:cerrar"),
         )
     return markup
 
 
-def texto_panel_ayuda(panel, es_propietario=False):
+def texto_panel_ayuda(panel, user_id, chat_id, chat_type):
+    es_admin = usuario_puede_administrar(chat_id, chat_type, user_id)
     paneles = {
-        "inicio": "Ayuda del bot\nSelecciona una categoría para consultar sus comandos.",
-        "info": (
-            "Información\n"
-            "/info — Muestra datos del chat y del usuario.\n"
-            "/id — Devuelve los identificadores de Telegram."
-        ),
-        "stickers": (
-            "Stickers\n"
-            "/q — Responde a un mensaje de texto para crear un sticker de cita."
-        ),
-        "moderacion": (
-            "Moderacion de grupos\n"
-            "/ban, /kick, /mute, /restrict o /promote ID o @usuario.\n"
-            "Tambien puedes responder al mensaje del usuario. Requiere permisos de administrador."
-        ),
-        "activacion": (
-            "Activación\n"
-            "Usa /activar o /cmds y pulsa el botón para solicitar una activación."
-        ),
-        "propietario": (
-            "Administración personal\n"
-            "/limpiar — Solicita borrar el historial privado con confirmación.\n"
-            "/addcmd nombre | respuesta — Crea un comando personalizado.\n"
-            "/delcmd nombre y /listcmd — Administra comandos personalizados."
-        ),
+        "inicio": "Ayuda de Flamie\nElige un panel. Los paneles administrativos solo se muestran a administradores del grupo y al propietario.",
+        "info": "Informacion\n/info, /id — Datos e identificadores del chat y usuario.\n/chatid — ID del chat.",
+        "ocio": "Ocio\n/8ball — Respuesta aleatoria.\n/dado — Lanza un dado.",
+        "stickers": "Stickers\n/q — Responde a un texto para crear sticker de cita.",
+        "reglas": "Reglas\n/rules — Consulta las reglas de este grupo.",
+        "utilidades": "Utilidades\n/chatlink — Obtiene el enlace del grupo.\n/staff — Lista administradores.\n/activar — Solicita una activacion en privado.",
+        "activacion": "Activacion\nUsa /activar o /cmds y sigue las instrucciones para enviar una solicitud.",
+        "moderacion": "Moderacion\n/ban, /tban, /kick — Expulsar o banear.\n/mute, /tmute, /unmute, /restrict — Silencios y restricciones.\nResponde a un mensaje o indica ID o @usuario conocido.",
+        "adminchat": "Administracion del grupo\n/promote y /demote — Gestion de administradores.\n/setrules y /clearrules — Gestion de reglas.\n/del, /pin, /unpin, /unallpin — Herramientas de mensajes.",
+        "propietario": "Panel del propietario\n/limpiar — Limpia el historial privado en tu cuenta tras confirmacion.\n/addcmd nombre | respuesta, /delcmd nombre, /listcmd — Comandos personalizados.",
     }
-    if panel == "propietario" and not es_propietario:
-        return "Este panel solo esta disponible para el propietario del bot."
+    paneles_admin = {"moderacion", "adminchat"}
+    if panel in paneles_admin and not es_admin:
+        return "Acceso denegado. Este panel solo esta disponible para administradores del grupo."
+    if panel == "propietario" and user_id != MI_ID:
+        return "Acceso denegado. Este panel solo esta disponible para el propietario."
     return paneles.get(panel, paneles["inicio"])
 
 
 @bot.callback_query_handler(func=lambda call: bool(call.data and call.data.startswith("help:")))
 def callback_ayuda(call):
     panel = call.data.split(":", 1)[1]
-    es_propietario = call.from_user.id == MI_ID
+    user_id = call.from_user.id
+    if panel == "cerrar":
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        bot.answer_callback_query(call.id)
+        return
     if panel == "activacion":
         if call.message.chat.type != "private":
-            bot.answer_callback_query(call.id, "Solicita la activación en el chat privado del bot.")
+            bot.answer_callback_query(call.id, "Solicita la activacion en el chat privado del bot.")
             return
         bot.answer_callback_query(call.id)
-        esperando_plataforma.add(call.from_user.id)
+        esperando_plataforma.add(user_id)
         pedir_plataforma_activacion(call.message.chat.id)
         return
-    texto = texto_panel_ayuda(panel, es_propietario)
-    markup = teclado_ayuda(call.message, panel) if panel != "propietario" or es_propietario else teclado_ayuda(call.message, "inicio")
+    texto = texto_panel_ayuda(panel, user_id, call.message.chat.id, call.message.chat.type)
+    markup = teclado_ayuda(call.message, user_id=user_id, panel=panel)
     try:
-        bot.edit_message_text(
-            texto,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup,
-        )
+        bot.edit_message_text(texto, call.message.chat.id, call.message.message_id, reply_markup=markup)
         bot.answer_callback_query(call.id)
     except Exception:
         bot.answer_callback_query(call.id, "No se pudo abrir este panel.")
-
 
 def registrar_usuarios_vistos(updates):
     """Guarda usuarios observados para poder resolver nombres de usuario."""
@@ -360,20 +393,21 @@ def query(sql, params=()):
 # ==========================================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
+    user_id = message.from_user.id if message.from_user else 0
     texto = (
         "Bienvenido. Usa /help para abrir los paneles de funciones o /info "
         "para consultar los datos de este chat."
     )
-    bot.reply_to(message, texto, reply_markup=teclado_ayuda(message))
+    bot.reply_to(message, texto, reply_markup=teclado_ayuda(message, user_id=user_id))
 
 
 @bot.message_handler(commands=['help'])
 def cmd_help(message):
-    es_propietario = bool(message.from_user and message.from_user.id == MI_ID)
+    user_id = message.from_user.id if message.from_user else 0
     bot.reply_to(
         message,
-        texto_panel_ayuda("inicio", es_propietario),
-        reply_markup=teclado_ayuda(message),
+        texto_panel_ayuda("inicio", user_id, message.chat.id, message.chat.type),
+        reply_markup=teclado_ayuda(message, user_id=user_id),
     )
 
 @bot.message_handler(commands=['cmds'])
@@ -411,6 +445,144 @@ def cmd_info(message):
         f"Usuario: {nombre}\nUsername: {username}\nID del usuario: <code>{usuario.id}</code>",
         parse_mode="HTML",
     )
+
+
+@bot.message_handler(commands=["chatid"])
+def cmd_chatid(message):
+    bot.reply_to(message, f"ID del chat: <code>{message.chat.id}</code>", parse_mode="HTML")
+
+
+@bot.message_handler(commands=["chatlink"])
+def cmd_chatlink(message):
+    try:
+        chat = bot.get_chat(message.chat.id)
+        enlace = f"https://t.me/{chat.username}" if chat.username else bot.export_chat_invite_link(message.chat.id)
+        bot.reply_to(message, html.escape(enlace), parse_mode="HTML", disable_web_page_preview=True)
+    except Exception:
+        bot.reply_to(message, "No pude obtener el enlace. El bot necesita permiso para invitar usuarios.")
+
+
+@bot.message_handler(commands=["staff"])
+def cmd_staff(message):
+    if message.chat.type == "private":
+        bot.reply_to(message, "Este comando se usa dentro de un grupo.")
+        return
+    try:
+        admins = bot.get_chat_administrators(message.chat.id)
+        nombres = [html.escape((a.user.first_name or "Usuario") + (f" (@{a.user.username})" if a.user.username else "")) for a in admins]
+        bot.reply_to(message, "Administradores del chat:\n" + "\n".join(nombres), parse_mode="HTML")
+    except Exception:
+        bot.reply_to(message, "No pude consultar los administradores de este chat.")
+
+
+@bot.message_handler(commands=["rules"])
+def cmd_rules(message):
+    filas = query("SELECT rules FROM chat_rules WHERE chat_id=?", (message.chat.id,))
+    bot.reply_to(message, str(filas[0][0]) if filas else "Este grupo no tiene reglas configuradas.")
+
+
+@bot.message_handler(commands=["8ball"])
+def cmd_8ball(message):
+    if not (message.text or "").split(maxsplit=1)[-1].strip() or len((message.text or "").split()) < 2:
+        bot.reply_to(message, "Uso: /8ball pregunta")
+        return
+    bot.reply_to(message, random.choice(["Sí.", "No.", "Es probable.", "No puedo asegurarlo.", "Inténtalo más tarde."]))
+
+
+@bot.message_handler(commands=["dado"])
+def cmd_dado(message):
+    bot.reply_to(message, f"Resultado: {random.randint(1, 6)}")
+
+
+def exigir_admin(message):
+    try:
+        return message.chat.type != "private" and usuario_es_admin(message.chat.id, message.from_user.id)
+    except Exception:
+        return False
+
+
+@bot.message_handler(commands=["setrules"])
+def cmd_setrules(message):
+    reglas = (message.text or "").partition(" ")[2].strip()
+    if not exigir_admin(message):
+        bot.reply_to(message, "Solo un administrador del grupo puede cambiar las reglas.")
+        return
+    if not reglas:
+        bot.reply_to(message, "Uso: /setrules texto de las reglas")
+        return
+    con = get_db()
+    try:
+        con.execute("INSERT INTO chat_rules(chat_id, rules) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET rules=excluded.rules, updated_at=CURRENT_TIMESTAMP", (message.chat.id, reglas))
+        con.commit()
+    finally:
+        con.close()
+    bot.reply_to(message, "Reglas del grupo actualizadas.")
+
+
+@bot.message_handler(commands=["clearrules"])
+def cmd_clearrules(message):
+    if not exigir_admin(message):
+        bot.reply_to(message, "Solo un administrador del grupo puede cambiar las reglas.")
+        return
+    con = get_db()
+    try:
+        con.execute("DELETE FROM chat_rules WHERE chat_id=?", (message.chat.id,))
+        con.commit()
+    finally:
+        con.close()
+    bot.reply_to(message, "Reglas eliminadas.")
+
+
+@bot.message_handler(commands=["del"])
+def cmd_del(message):
+    if not exigir_admin(message):
+        bot.reply_to(message, "Solo un administrador del grupo puede borrar mensajes.")
+        return
+    if not message.reply_to_message:
+        bot.reply_to(message, "Responde con /del al mensaje que quieras borrar.")
+        return
+    try:
+        bot.delete_message(message.chat.id, message.reply_to_message.message_id)
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception as exc:
+        bot.reply_to(message, f"No pude borrar el mensaje: {html.escape(str(exc))}")
+
+
+@bot.message_handler(commands=["pin"])
+def cmd_pin(message):
+    if not exigir_admin(message) or not message.reply_to_message:
+        bot.reply_to(message, "Un administrador debe responder con /pin al mensaje.")
+        return
+    try:
+        bot.pin_chat_message(message.chat.id, message.reply_to_message.message_id)
+    except Exception as exc:
+        bot.reply_to(message, f"No pude fijar el mensaje: {html.escape(str(exc))}")
+
+
+@bot.message_handler(commands=["unpin"])
+def cmd_unpin(message):
+    if not exigir_admin(message):
+        bot.reply_to(message, "Solo un administrador del grupo puede desfijar mensajes.")
+        return
+    try:
+        if message.reply_to_message:
+            bot.unpin_chat_message(message.chat.id, message.reply_to_message.message_id)
+        else:
+            bot.unpin_chat_message(message.chat.id)
+    except Exception as exc:
+        bot.reply_to(message, f"No pude desfijar el mensaje: {html.escape(str(exc))}")
+
+
+@bot.message_handler(commands=["unallpin"])
+def cmd_unallpin(message):
+    if not exigir_admin(message):
+        bot.reply_to(message, "Solo un administrador del grupo puede desfijar mensajes.")
+        return
+    try:
+        bot.unpin_all_chat_messages(message.chat.id)
+        bot.reply_to(message, "Se desfijaron los mensajes del grupo.")
+    except Exception as exc:
+        bot.reply_to(message, f"No pude desfijar los mensajes: {html.escape(str(exc))}")
 
 
 @bot.message_handler(commands=['limpiar'])
@@ -590,7 +762,7 @@ def recibir_documento(message):
 # 11.1 MODERACION Y ADMINISTRACION DE CHATS
 # ==========================================
 MODERATION_RE = re.compile(
-    r"^\s*[/.,]\s*(ban|mute|restrict|kick|promote)(?:@[A-Za-z0-9_]+)?(?:\s+|$)(.*)$",
+    r"^\s*[/.,]\s*(ban|tban|mute|tmute|unmute|restrict|kick|promote|demote|warn|unwarn)(?:@[A-Za-z0-9_]+)?(?:\s+|$)(.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -683,15 +855,57 @@ def procesar_comando_moderacion(message):
             bot.reply_to(message, "No puedes aplicar esta accion sobre ti mismo.")
             return
 
-        if comando == "ban":
-            bot.ban_chat_member(message.chat.id, objetivo)
-            respuesta = f"Usuario {objetivo} baneado."
+        if comando in ("warn", "unwarn"):
+            miembro_objetivo = bot.get_chat_member(message.chat.id, objetivo)
+            if miembro_objetivo.status in ("administrator", "creator"):
+                bot.reply_to(message, "No se puede cambiar las advertencias de un administrador.")
+                return
+            con = get_db()
+            try:
+                if comando == "warn":
+                    con.execute("INSERT INTO warnings(chat_id,user_id,count) VALUES(?,?,1) ON CONFLICT(chat_id,user_id) DO UPDATE SET count=count+1", (message.chat.id, objetivo))
+                    con.commit()
+                    fila = con.execute("SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (message.chat.id, objetivo)).fetchone()
+                    cuenta = int(fila[0])
+                else:
+                    con.execute("DELETE FROM warnings WHERE chat_id=? AND user_id=?", (message.chat.id, objetivo))
+                    con.commit()
+                    cuenta = 0
+            finally:
+                con.close()
+            if comando == "warn" and cuenta >= 3:
+                bot.ban_chat_member(message.chat.id, objetivo)
+                bot.reply_to(message, f"Advertencia {cuenta}/3. Usuario {objetivo} expulsado al alcanzar el limite.")
+            else:
+                bot.reply_to(message, f"Advertencias de {objetivo}: {cuenta}/3." if comando == "warn" else f"Advertencias de {objetivo} eliminadas.")
+            return
+
+        if comando in ("ban", "tban"):
+            duracion = duracion_a_segundos(resto.split()[0]) if resto.split() else None
+            if comando == "tban" and not duracion:
+                raise ValueError("Uso: /tban 1d ID o responde al mensaje con /tban 1d.")
+            hasta = int(time.time()) + duracion if duracion else None
+            bot.ban_chat_member(message.chat.id, objetivo, until_date=hasta)
+            respuesta = f"Usuario {objetivo} baneado" + (f" por {resto.split()[0]}." if duracion else ".")
         elif comando == "kick":
             bot.ban_chat_member(message.chat.id, objetivo)
             bot.unban_chat_member(message.chat.id, objetivo)
             respuesta = f"Usuario {objetivo} expulsado."
-        elif comando in ("mute", "restrict"):
+        elif comando == "unmute":
+            permisos = telebot.types.ChatPermissions(
+                can_send_messages=True, can_send_media_messages=True, can_send_audios=True,
+                can_send_documents=True, can_send_photos=True, can_send_videos=True,
+                can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True,
+                can_send_other_messages=True, can_add_web_page_previews=True,
+            )
+            bot.restrict_chat_member(message.chat.id, objetivo, permissions=permisos)
+            respuesta = f"Se retiro el silencio de {objetivo}."
+        elif comando in ("mute", "tmute", "restrict"):
             duracion = duracion_a_segundos(resto.split()[0]) if resto.split() else None
+            if comando == "tmute" and not duracion:
+                raise ValueError("Uso: /tmute 30m ID o responde al mensaje con /tmute 30m.")
+            if resto.split() and not duracion:
+                raise ValueError("Duracion invalida. Usa s, m, h o d; por ejemplo 30m o 2h.")
             hasta = int(time.time()) + duracion if duracion else None
             permisos = telebot.types.ChatPermissions(
                 can_send_messages=False,
@@ -711,7 +925,11 @@ def procesar_comando_moderacion(message):
             )
             sufijo = f" por {resto.split()[0]}" if duracion else " sin limite de tiempo"
             respuesta = f"Usuario {objetivo} restringido{sufijo}."
-        else:
+        elif comando == "demote":
+            derechos = {nombre_api: False for nombre_api in PERMISOS_ADMIN.values()}
+            bot.promote_chat_member(message.chat.id, objetivo, **derechos)
+            respuesta = f"Se retiraron los permisos de administrador a {objetivo}."
+        elif comando == "promote":
             derechos = {nombre_api: False for nombre_api in PERMISOS_ADMIN.values()}
             palabras = [p.strip().lower() for p in resto.replace(",", " ").split()]
             for palabra in palabras:
@@ -728,6 +946,8 @@ def procesar_comando_moderacion(message):
             bot.promote_chat_member(message.chat.id, objetivo, **derechos)
             lista = ", ".join(k.removeprefix("can_") for k in derechos)
             respuesta = f"Usuario {objetivo} promovido. Permisos: {lista}."
+        else:
+            return
         bot.reply_to(message, respuesta)
     except ValueError as exc:
         bot.reply_to(message, str(exc))
@@ -745,7 +965,11 @@ def comandos_moderacion(message):
 # ==========================================
 COMANDOS_RESERVADOS = {
     "start", "help", "cmds", "activar", "info", "id", "limpiar", "q",
-    "ban", "mute", "restrict", "kick", "promote", "addcmd", "delcmd", "listcmd",
+    "uinfo", "chatid", "chatlink", "staff", "rules", "sticker", "idsticker", "getsticker",
+    "quiz", "8ball", "dado", "top", "ban", "tban", "mute", "tmute", "unmute",
+    "restrict", "kick", "promote", "demote", "warn", "unwarn", "settitle", "setgtitle",
+    "setdescr", "del", "pin", "unpin", "unallpin", "admin", "msg", "copy", "forward",
+    "welcome", "captcha", "setrules", "clearrules", "spam", "addcmd", "delcmd", "listcmd",
 }
 COMANDO_SLASH_RE = re.compile(r"^\s*/([A-Za-z][A-Za-z0-9_]{0,31})(?:@[A-Za-z0-9_]+)?(?:\s+|$)(.*)$", re.DOTALL)
 
