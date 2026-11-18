@@ -5,7 +5,6 @@ from datetime import date, datetime
 from pathlib import Path
 import html
 import threading
-import google.genai as genai
 import io
 import re
 import time
@@ -40,7 +39,6 @@ def _require_env(name):
 
 TOKEN = _require_env("TELEGRAM_BOT_TOKEN")
 MI_ID = int(_require_env("TELEGRAM_OWNER_ID"))
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # DATA_DIR se puede sobreescribir con variable de entorno para Railway Volume
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -77,34 +75,11 @@ def init_db():
         if "duplicate column name: hora" not in str(exc).lower():
             raise
 
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS alertas_directas (
-            id       INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id  INTEGER,
-            nombre   TEXT,
-            mensaje  TEXT,
-            fecha    TEXT,
-            hora     TEXT DEFAULT ""
-        )
-    ''')
-    try:
-        cur.execute("ALTER TABLE alertas_directas ADD COLUMN hora TEXT DEFAULT ''")
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name: hora" not in str(exc).lower():
-            raise
-
     # Tabla para recordar a quien ya se le envio la respuesta automatica
     # Persiste entre reinicios del bot
     cur.execute('''
         CREATE TABLE IF NOT EXISTS usuarios_notificados (
             user_id INTEGER PRIMARY KEY
-        )
-    ''')
-
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS config (
-            clave TEXT PRIMARY KEY,
-            valor TEXT
         )
     ''')
 
@@ -151,7 +126,144 @@ usuarios_notificados_cache = cargar_usuarios_notificados()
 # 4. BOT
 # ==========================================
 bot = telebot.TeleBot(TOKEN)
-usuarios_silenciados = set()
+def comandos_personalizados_menu():
+    """Devuelve los comandos guardados para incluirlos en el menu de Telegram."""
+    filas = query("SELECT command FROM custom_commands ORDER BY command LIMIT 80")
+    return [
+        telebot.types.BotCommand(str(fila[0]), "Comando personalizado")
+        for fila in filas
+    ]
+
+
+def registrar_comandos_menu():
+    """Publica los comandos disponibles en el autocompletado de Telegram."""
+    comandos_base = [
+        telebot.types.BotCommand("start", "Inicia el bot"),
+        telebot.types.BotCommand("help", "Abre los paneles de ayuda"),
+        telebot.types.BotCommand("info", "Muestra informacion del chat y usuario"),
+        telebot.types.BotCommand("id", "Muestra identificadores de Telegram"),
+        telebot.types.BotCommand("q", "Crea un sticker de una conversacion"),
+    ]
+    comandos_privados = comandos_base + [
+        telebot.types.BotCommand("cmds", "Solicita una activacion"),
+        telebot.types.BotCommand("activar", "Solicita una activacion"),
+    ]
+    moderacion = [
+        telebot.types.BotCommand("ban", "Banea a un usuario del grupo"),
+        telebot.types.BotCommand("kick", "Expulsa a un usuario del grupo"),
+        telebot.types.BotCommand("mute", "Restringe a un usuario"),
+        telebot.types.BotCommand("restrict", "Restringe a un usuario"),
+        telebot.types.BotCommand("promote", "Promueve a un usuario"),
+    ]
+    propietario = [
+        telebot.types.BotCommand("limpiar", "Limpia este historial con confirmacion"),
+        telebot.types.BotCommand("addcmd", "Crea o actualiza un comando"),
+        telebot.types.BotCommand("delcmd", "Elimina un comando personalizado"),
+        telebot.types.BotCommand("listcmd", "Lista comandos personalizados"),
+    ]
+    personalizados = comandos_personalizados_menu()
+    comandos_grupo = comandos_base + personalizados
+
+    try:
+        bot.set_my_commands(
+            comandos_privados + personalizados,
+            scope=telebot.types.BotCommandScopeAllPrivateChats(),
+        )
+        bot.set_my_commands(
+            comandos_grupo,
+            scope=telebot.types.BotCommandScopeAllGroupChats(),
+        )
+        bot.set_my_commands(
+            comandos_grupo + moderacion,
+            scope=telebot.types.BotCommandScopeAllChatAdministrators(),
+        )
+        bot.set_my_commands(
+            comandos_privados + propietario + personalizados,
+            scope=telebot.types.BotCommandScopeChat(chat_id=MI_ID),
+        )
+    except Exception:
+        print("No se pudo actualizar el menu de comandos de Telegram.")
+
+
+def teclado_ayuda(message, panel="inicio"):
+    markup = telebot.types.InlineKeyboardMarkup()
+    if panel == "inicio":
+        markup.row(
+            telebot.types.InlineKeyboardButton("Información", callback_data="help:info"),
+            telebot.types.InlineKeyboardButton("Moderación", callback_data="help:moderacion"),
+        )
+        markup.row(
+            telebot.types.InlineKeyboardButton("Activación", callback_data="help:activacion"),
+            telebot.types.InlineKeyboardButton("Stickers", callback_data="help:stickers"),
+        )
+        if message.from_user and message.from_user.id == MI_ID:
+            markup.row(
+                telebot.types.InlineKeyboardButton("Administración personal", callback_data="help:propietario")
+            )
+    else:
+        markup.row(
+            telebot.types.InlineKeyboardButton("Volver", callback_data="help:inicio")
+        )
+    return markup
+
+
+def texto_panel_ayuda(panel, es_propietario=False):
+    paneles = {
+        "inicio": "Ayuda del bot\nSelecciona una categoría para consultar sus comandos.",
+        "info": (
+            "Información\n"
+            "/info — Muestra datos del chat y del usuario.\n"
+            "/id — Devuelve los identificadores de Telegram."
+        ),
+        "stickers": (
+            "Stickers\n"
+            "/q — Responde a un mensaje de texto para crear un sticker de cita."
+        ),
+        "moderacion": (
+            "Moderacion de grupos\n"
+            "/ban, /kick, /mute, /restrict o /promote ID o @usuario.\n"
+            "Tambien puedes responder al mensaje del usuario. Requiere permisos de administrador."
+        ),
+        "activacion": (
+            "Activación\n"
+            "Usa /activar o /cmds y pulsa el botón para solicitar una activación."
+        ),
+        "propietario": (
+            "Administración personal\n"
+            "/limpiar — Solicita borrar el historial privado con confirmación.\n"
+            "/addcmd nombre | respuesta — Crea un comando personalizado.\n"
+            "/delcmd nombre y /listcmd — Administra comandos personalizados."
+        ),
+    }
+    if panel == "propietario" and not es_propietario:
+        return "Este panel solo esta disponible para el propietario del bot."
+    return paneles.get(panel, paneles["inicio"])
+
+
+@bot.callback_query_handler(func=lambda call: bool(call.data and call.data.startswith("help:")))
+def callback_ayuda(call):
+    panel = call.data.split(":", 1)[1]
+    es_propietario = call.from_user.id == MI_ID
+    if panel == "activacion":
+        if call.message.chat.type != "private":
+            bot.answer_callback_query(call.id, "Solicita la activación en el chat privado del bot.")
+            return
+        bot.answer_callback_query(call.id)
+        esperando_plataforma.add(call.from_user.id)
+        pedir_plataforma_activacion(call.message.chat.id)
+        return
+    texto = texto_panel_ayuda(panel, es_propietario)
+    markup = teclado_ayuda(call.message, panel) if panel != "propietario" or es_propietario else teclado_ayuda(call.message, "inicio")
+    try:
+        bot.edit_message_text(
+            texto,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+        )
+        bot.answer_callback_query(call.id)
+    except Exception:
+        bot.answer_callback_query(call.id, "No se pudo abrir este panel.")
 
 
 def registrar_usuarios_vistos(updates):
@@ -186,38 +298,6 @@ def registrar_usuarios_vistos(updates):
 bot.set_update_listener(registrar_usuarios_vistos)
 
 # ==========================================
-# 4.1 CACHE DE ANIMACIONES (GIFs)
-# ==========================================
-# Telegram devuelve un file_id la primera vez que subes un archivo. Si se
-# vuelve a mandar el mismo archivo local cada vez, Telegram lo vuelve a subir
-# desde cero (eso es lo que generaba la demora en /start y /cmds). Guardando
-# el file_id la primera vez, los siguientes envios son casi instantaneos.
-_gif_ids = {}
-
-
-def resolver_ruta_media(nombre_archivo):
-    return BASE_DIR / nombre_archivo
-
-
-def enviar_animacion_cacheada(chat_id, ruta_gif, caption=None, parse_mode=None, reply_markup=None):
-    ruta_absoluta = str(resolver_ruta_media(ruta_gif))
-    file_id = _gif_ids.get(ruta_absoluta)
-    try:
-        if file_id:
-            msg = bot.send_animation(
-                chat_id, file_id, caption=caption, parse_mode=parse_mode, reply_markup=reply_markup
-            )
-        else:
-            with open(ruta_absoluta, "rb") as f:
-                msg = bot.send_animation(
-                    chat_id, f, caption=caption, parse_mode=parse_mode, reply_markup=reply_markup
-                )
-            if msg and msg.animation:
-                _gif_ids[ruta_absoluta] = msg.animation.file_id
-        return msg
-    except FileNotFoundError:
-        return None
-
 # ==========================================
 # 5. HELPERS
 # ==========================================
@@ -235,19 +315,6 @@ def _guardar_mensaje_db(user_id, nombre, mensaje):
     try:
         con.execute(
             "INSERT INTO mensajes (user_id, nombre, mensaje, fecha, hora) VALUES (?,?,?,?,?)",
-            (user_id, nombre, mensaje, fecha, hora)
-        )
-        con.commit()
-    finally:
-        con.close()
-
-def guardar_alerta(user_id, nombre, mensaje):
-    fecha = date.today().strftime("%Y-%m-%d")
-    hora  = datetime.now().strftime("%H:%M:%S")
-    con = get_db()
-    try:
-        con.execute(
-            "INSERT INTO alertas_directas (user_id, nombre, mensaje, fecha, hora) VALUES (?,?,?,?,?)",
             (user_id, nombre, mensaje, fecha, hora)
         )
         con.commit()
@@ -293,240 +360,95 @@ def query(sql, params=()):
 # ==========================================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    if message.chat.id == MI_ID:
-        bot.reply_to(message, "Flamie Bot en línea.")
-        return
-    # Usuario externo
-    if message.chat.id in usuarios_silenciados:
-        usuarios_silenciados.remove(message.chat.id)
     texto = (
-        "Has llegado a la puerta del dominio de MsTarantula.\n"
-        "Deja tu mensaje y espera respuesta.\n\n"
-        "Usa /cmds para ver los comandos disponibles."
+        "Bienvenido. Usa /help para abrir los paneles de funciones o /info "
+        "para consultar los datos de este chat."
     )
-    try:
-        msg = enviar_animacion_cacheada(message.chat.id, "FlamieBot.gif", caption=texto)
-        if msg is None:
-            bot.send_message(message.chat.id, texto)
-    except Exception:
-        bot.send_message(message.chat.id, texto)
+    bot.reply_to(message, texto, reply_markup=teclado_ayuda(message))
+
+
+@bot.message_handler(commands=['help'])
+def cmd_help(message):
+    es_propietario = bool(message.from_user and message.from_user.id == MI_ID)
+    bot.reply_to(
+        message,
+        texto_panel_ayuda("inicio", es_propietario),
+        reply_markup=teclado_ayuda(message),
+    )
 
 @bot.message_handler(commands=['cmds'])
 def cmd_cmds(message):
-    if message.chat.id == MI_ID:
-        texto = (
-            "<b>Panel de Administracion - MsTarantula</b>\n\n"
-            "<b>Reportes:</b>\n"
-            "/hoy — Mensajes recibidos hoy (bot + cuenta personal)\n"
-            "/stats — Estadisticas generales\n"
-            "/resumen — Analisis IA del dia\n\n"
-            "<b>Gestion:</b>\n"
-            "/reload — Reinicia el sistema (limpia silenciados y notificados)\n"
-            "/borrar [Nombre] — Elimina registros de un usuario\n"
-            "/silenciar [ID] — Silencia manualmente a un usuario\n\n"
-            "<b>Dinamicas:</b>\n"
-            "/setdinamica [texto] — Activa una nueva dinamica\n"
-            "/enddinamica — Cierra la dinamica actual"
-        )
-    else:
-        texto = (
-            "Sᴏʏ Lᴀ Asɪsᴛᴇɴᴛᴇ Pᴇʀsᴏɴᴀʟ Dᴇ @MsTarantula\n\n"
-            "<b>Comandos Disponibles:</b>\n\n"
-            "/me — Muestra tu informacion de perfil\n"
-            "/estado — Verifica el estado de tu mensaje\n\n"
-            "O elige una opcion abajo:"          
-        )
-        try:
-            msg = enviar_animacion_cacheada(
-                message.chat.id, "FlamieCmds.gif",
-                caption=texto, parse_mode='HTML', reply_markup=teclado_cmds()
-            )
-            if msg is None:
-                bot.reply_to(message, texto, parse_mode='HTML', reply_markup=teclado_cmds())
-        except Exception:
-            bot.reply_to(message, texto, parse_mode='HTML', reply_markup=teclado_cmds())
+    if message.chat.type != "private":
+        bot.reply_to(message, "Solicita la activación en el chat privado del bot.")
         return
-    bot.reply_to(message, texto, parse_mode='HTML')
-
-@bot.message_handler(commands=['reload'])
-def cmd_reload(message):
-    if message.chat.id != MI_ID:
-        return
-    usuarios_silenciados.clear()
-    usuarios_notificados_cache.clear()
-    con = get_db()
-    try:
-        con.execute("DELETE FROM usuarios_notificados")
-        con.commit()
-    finally:
-        con.close()
-    bot.reply_to(message, "✦ Sistema reiniciado.\nUsuarios silenciados: limpiados.\nTodos los usuarios recibiran la respuesta automatica de nuevo.")
-
-@bot.message_handler(commands=['silenciar'])
-def cmd_silenciar(message):
-    if message.chat.id != MI_ID:
-        return
-    partes = message.text.split(maxsplit=1)
-    if len(partes) < 2:
-        bot.reply_to(message, "Formato: /silenciar [ID numerico]")
-        return
-    try:
-        usuarios_silenciados.add(int(partes[1]))
-        bot.reply_to(message, f"Usuario {partes[1]} silenciado.")
-    except ValueError:
-        bot.reply_to(message, "El ID debe ser un numero.")
-
-@bot.message_handler(commands=['borrar'])
-def cmd_borrar(message):
-    if message.chat.id != MI_ID:
-        return
-    partes = message.text.split(maxsplit=1)
-    if len(partes) < 2:
-        bot.reply_to(message, "Formato: /borrar [NombreDelUsuario]")
-        return
-    nombre = partes[1]
-    con = get_db()
-    try:
-        cur = con.execute("DELETE FROM mensajes WHERE nombre LIKE ?", (f'%{nombre}%',))
-        borrados = cur.rowcount
-        con.commit()
-    finally:
-        con.close()
-    if borrados:
-        bot.reply_to(message, f"Eliminados {borrados} mensajes de '{nombre}'.")
-    else:
-        bot.reply_to(message, f"No se encontraron mensajes de '{nombre}'.")
-
-
-
-@bot.message_handler(commands=['stats'])
-def cmd_stats(message):
-    if message.chat.id != MI_ID:
-        return
-    total_msgs   = query("SELECT COUNT(*) FROM mensajes")[0][0]
-    total_users  = query("SELECT COUNT(DISTINCT user_id) FROM mensajes")[0][0]
-    total_alerta = query("SELECT COUNT(*) FROM alertas_directas")[0][0]
-    top          = query("SELECT nombre, COUNT(*) as c FROM mensajes GROUP BY user_id ORDER BY c DESC LIMIT 5")
-    por_dia      = query("SELECT fecha, COUNT(*) as c FROM mensajes GROUP BY fecha ORDER BY fecha DESC LIMIT 7")
-
-    texto = (
-        "<b>Estadisticas Generales</b>\n\n"
-        f"Total mensajes al bot: <b>{total_msgs}</b>\n"
-        f"Usuarios unicos: <b>{total_users}</b>\n"
-        f"Alertas de mensajes directos: <b>{total_alerta}</b>\n\n"
-        "<b>Top 5 usuarios mas activos:</b>\n"
+    bot.reply_to(
+        message,
+        "Selecciona Activación para indicar la plataforma y enviar tu solicitud.",
+        reply_markup=teclado_cmds(),
     )
-    for nombre, count in top:
-        texto += f"  {html.escape(str(nombre))}: {count} mensajes\n"
-    texto += "\n<b>Mensajes por dia (ultimos 7):</b>\n"
-    for fecha, count in por_dia:
-        texto += f"  {fecha}: {count}\n"
-    bot.reply_to(message, texto, parse_mode='HTML')
 
-@bot.message_handler(commands=['hoy'])
-def cmd_hoy(message):
-    if message.chat.id != MI_ID:
+
+@bot.message_handler(commands=['activar'])
+def cmd_activar(message):
+    if message.chat.type != "private":
+        bot.reply_to(message, "Solicita la activación en el chat privado del bot.")
         return
-    fecha = date.today().strftime("%Y-%m-%d")
-    total_msgs  = query("SELECT COUNT(*), COUNT(DISTINCT user_id) FROM mensajes WHERE fecha=?", (fecha,))[0]
-    total_alerta = query("SELECT COUNT(*) FROM alertas_directas WHERE fecha=?", (fecha,))[0][0]
-    registros   = query("SELECT nombre, mensaje, user_id, hora FROM mensajes WHERE fecha=? ORDER BY hora", (fecha,))
-    alertas     = query("SELECT nombre, mensaje, user_id, hora FROM alertas_directas WHERE fecha=? ORDER BY hora", (fecha,))
+    esperando_plataforma.add(message.from_user.id)
+    pedir_plataforma_activacion(message.chat.id)
 
-    texto = (
-        f"<b>Reporte del {fecha}</b>\n\n"
-        f"Usuarios unicos al bot: <b>{total_msgs[1]}</b>\n"
-        f"Mensajes al bot: <b>{total_msgs[0]}</b>\n"
-        f"Mensajes directos a tu cuenta: <b>{total_alerta}</b>\n"
+
+@bot.message_handler(commands=['info', 'id'])
+def cmd_info(message):
+    usuario = message.from_user
+    nombre = html.escape(usuario.first_name or "Sin nombre")
+    username = "@" + html.escape(usuario.username) if usuario.username else "Sin username"
+    chat = html.escape(message.chat.title or "Chat privado")
+    tipo = html.escape(message.chat.type or "desconocido")
+    bot.reply_to(
+        message,
+        "Información del chat\n"
+        f"Nombre: {chat}\nTipo: {tipo}\nID del chat: <code>{message.chat.id}</code>\n\n"
+        f"Usuario: {nombre}\nUsername: {username}\nID del usuario: <code>{usuario.id}</code>",
+        parse_mode="HTML",
     )
-    if registros:
-        texto += "\n<b>Mensajes recibidos por el bot:</b>\n"
-        for nombre, msg, uid, hora in registros:
-            hora_str = hora or "--:--"
-            texto += f"[{hora_str}] <a href='tg://user?id={uid}'>{html.escape(str(nombre))}</a>: {html.escape(str(msg))}\n"
-    if alertas:
-        texto += "\n<b>Mensajes directos a tu cuenta personal:</b>\n"
-        for nombre, msg, uid, hora in alertas:
-            hora_str = hora or "--:--"
-            texto += f"[{hora_str}] <a href='tg://user?id={uid}'>{html.escape(str(nombre))}</a>: {html.escape(str(msg))}\n"
-    if not registros and not alertas:
-        texto += "\nNo hay actividad registrada hoy."
 
-    for i in range(0, len(texto), 4000):
-        bot.send_message(MI_ID, texto[i:i+4000], parse_mode='HTML')
 
-@bot.message_handler(commands=['resumen'])
-def cmd_resumen(message):
-    if message.chat.id != MI_ID:
+@bot.message_handler(commands=['limpiar'])
+def cmd_limpiar(message):
+    if message.chat.type != "private" or not message.from_user or message.from_user.id != MI_ID:
+        bot.reply_to(message, "Este comando solo está disponible en el chat privado del propietario.")
         return
-    if not GEMINI_API_KEY:
-        bot.reply_to(message, "La IA no está configurada en este servidor. Define GEMINI_API_KEY para usar /resumen.")
-        return
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    bot.reply_to(message, "Procesando con IA, un momento...")
-    fecha = date.today().strftime("%Y-%m-%d")
-    bot_msgs     = query("SELECT nombre, mensaje, hora FROM mensajes WHERE fecha=?", (fecha,))
-    direct_msgs  = query("SELECT nombre, mensaje, hora FROM alertas_directas WHERE fecha=?", (fecha,))
-
-    if not bot_msgs and not direct_msgs:
-        bot.send_message(MI_ID, "No hay actividad registrada hoy.")
-        return
-
-    prompt = (
-        "Eres el asistente ejecutivo de MsTarantula, una desarrolladora. "
-        "Analiza los mensajes recibidos hoy y genera un reporte con:\n"
-        "1. RESUMEN GENERAL (2-3 oraciones)\n"
-        "2. URGENTE (si hay algo que requiere atencion inmediata, sino escribe Ninguno)\n"
-        "3. CATEGORIAS (clasifica las solicitudes)\n"
-        "4. USUARIOS DESTACADOS (quien contacto mas o con solicitudes importantes)\n"
-        "5. RECOMENDACION (que deberia priorizar responder)\n\n"
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.row(
+        telebot.types.InlineKeyboardButton("Confirmar limpieza", callback_data="limpiar:confirmar"),
+        telebot.types.InlineKeyboardButton("Cancelar", callback_data="limpiar:cancelar"),
     )
-    if bot_msgs:
-        prompt += "MENSAJES AL BOT:\n"
-        for nombre, msg, hora in bot_msgs:
-            prompt += f"- [{hora}] {nombre}: '{msg}'\n"
-    if direct_msgs:
-        prompt += "\nMENSAJES DIRECTOS A SU CUENTA PERSONAL:\n"
-        for nombre, msg, hora in direct_msgs:
-            prompt += f"- [{hora}] {nombre}: '{msg}'\n"
+    bot.reply_to(
+        message,
+        "Esto borrará el historial de este chat solo en tu cuenta. La acción no se puede deshacer.",
+        reply_markup=markup,
+    )
 
-    try:
-        respuesta = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        bot.send_message(MI_ID, f"<b>Analisis IA del dia:</b>\n\n{respuesta.text}", parse_mode='HTML')
-    except Exception as e:
-        bot.send_message(MI_ID, f"Error de IA: {e}")
+
+@bot.callback_query_handler(func=lambda call: bool(call.data and call.data.startswith("limpiar:")))
+def callback_limpiar(call):
+    if call.from_user.id != MI_ID or call.message.chat.id != MI_ID:
+        bot.answer_callback_query(call.id, "Acción no autorizada.")
+        return
+    if call.data == "limpiar:cancelar":
+        bot.edit_message_text("Limpieza cancelada.", call.message.chat.id, call.message.message_id)
+        bot.answer_callback_query(call.id)
+        return
+    if call.data != "limpiar:confirmar":
+        bot.answer_callback_query(call.id, "Acción no válida.")
+        return
+    bot.edit_message_text("Solicitud confirmada. El historial se limpiará en tu cuenta.", call.message.chat.id, call.message.message_id)
+    bot.send_message(MI_ID, "/__limpiar_confirmado")
+    bot.answer_callback_query(call.id)
 
 # ==========================================
-# 7. HELPERS — CONFIG Y DINAMICA
+# 7. PLATAFORMAS Y ACTIVACION
 # ==========================================
-def get_config(clave):
-    con = get_db()
-    try:
-        cur = con.execute("SELECT valor FROM config WHERE clave=?", (clave,))
-        row = cur.fetchone()
-        return row[0] if row else None
-    finally:
-        con.close()
-
-def set_config(clave, valor):
-    con = get_db()
-    try:
-        con.execute("INSERT OR REPLACE INTO config (clave, valor) VALUES (?,?)", (clave, valor))
-        con.commit()
-    finally:
-        con.close()
-
-def del_config(clave):
-    con = get_db()
-    try:
-        con.execute("DELETE FROM config WHERE clave=?", (clave,))
-        con.commit()
-    finally:
-        con.close()
-
 # Plataformas conocidas para detectar codigos
 PLATAFORMAS = {
     "netflix": "Netflix", "spotify": "Spotify", "steam": "Steam",
@@ -550,42 +472,17 @@ def detectar_plataforma(texto):
 def teclado_responder(user_id):
     markup = telebot.types.InlineKeyboardMarkup()
     markup.row(
-        telebot.types.InlineKeyboardButton("✉️ Dinámica", callback_data=f"resp:din:{user_id}"),
         telebot.types.InlineKeyboardButton("🔑 Activación", callback_data=f"resp:act:{user_id}")
     )
     return markup
 
 def teclado_cmds():
-    """Botones que se muestran a un usuario externo en /cmds para que elija
-    si viene por una dinamica o si necesita una activacion para su TV."""
+    """Botón de solicitud para el flujo de activación existente."""
     markup = telebot.types.InlineKeyboardMarkup()
     markup.row(
-        telebot.types.InlineKeyboardButton("🎁 Dinámica", callback_data="cmds:din"),
-        telebot.types.InlineKeyboardButton("🔑 Activación", callback_data="cmds:act")
+        telebot.types.InlineKeyboardButton("Activación", callback_data="cmds:act")
     )
     return markup
-
-def mostrar_dinamica(chat_id):
-    """Texto de la dinamica activa (o aviso de que no hay ninguna), reutilizado
-    tanto por /dinamica como por el boton del menu /cmds."""
-    info = get_config("dinamica")
-    if info is None:
-        bot.send_message(
-            chat_id,
-            "【✦】•━【𝙵𝚕𝚊𝚖𝚒𝚎 𝚂𝚙𝚎𝚎𝚍𝚍𝚛𝚊𝚠】━•【✦】\n"
-            "╰┈➤ No hay ninguna dinamica activa en este momento.\n"
-        )
-        return
-    bot.send_message(
-        chat_id,
-        "【✦】•━【𝙵𝚕𝚊𝚖𝚒𝚎 𝚂𝚙𝚎𝚎𝚍𝚍𝚛𝚊𝚠】━•【✦】\n"
-        f"╰┈➤{info}\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "╰┈➤ Pᴀʀᴀ Rᴇᴄʟᴀᴍᴀʀ Tᴜ Pʀᴇᴍɪᴏ\n"
-        "╰┈➤ Eɴᴠɪᴀ Tᴜs Pʀᴜᴇʙᴀs Aqᴜɪ Cᴏᴍᴏ Fᴏᴛᴏ\n"
-        "╰┈➤ Esᴘᴇʀᴀ Cᴏɴғɪʀᴍᴀᴄɪᴏɴ\n"
-        "【✦】•━【𝙵𝚕𝚊𝚖𝚒𝚎 𝚂𝚙𝚎𝚎𝚍𝚍𝚛𝚊𝚠】━•【✦】"
-    )
 
 def pedir_plataforma_activacion(chat_id):
     """Pide al usuario que indique la plataforma cuando elige 'Activación'
@@ -597,21 +494,18 @@ def pedir_plataforma_activacion(chat_id):
     )
 
 # ==========================================
-# 8.1 CALLBACK — MENU /cmds (Dinamica / Activacion)
+# 8.1 CALLBACK — MENU DE ACTIVACION
 # ==========================================
-@bot.callback_query_handler(func=lambda call: call.data.startswith("cmds:"))
+@bot.callback_query_handler(func=lambda call: call.data == "cmds:act")
 def callback_menu_cmds(call):
-    opcion = call.data.split(":")[1]   # "din" o "act"
     chat_id = call.message.chat.id
     uid = call.from_user.id
-
-    if opcion == "din":
-        bot.answer_callback_query(call.id, "Dinámica")
-        mostrar_dinamica(chat_id)
-    else:
-        bot.answer_callback_query(call.id, "Activación")
-        esperando_plataforma.add(uid)
-        pedir_plataforma_activacion(chat_id)
+    if call.message.chat.type != "private":
+        bot.answer_callback_query(call.id, "Solicita la activación en el chat privado del bot.")
+        return
+    bot.answer_callback_query(call.id, "Activación")
+    esperando_plataforma.add(uid)
+    pedir_plataforma_activacion(chat_id)
 
 # ==========================================
 # 8. CALLBACK — BOTON RESPONDER
@@ -622,9 +516,9 @@ def callback_responder(call):
         bot.answer_callback_query(call.id)
         return
     partes = call.data.split(":")
-    tipo = partes[1]   # "din" o "act"
+    tipo = partes[1]
     uid  = partes[2]
-    etiqueta = "Dinámica" if tipo == "din" else "Activación"
+    etiqueta = "Activación" if tipo == "act" else "Respuesta directa"
     bot.answer_callback_query(call.id, f"Escribe tu respuesta ({etiqueta})")
     msg = bot.send_message(
         MI_ID,
@@ -652,81 +546,8 @@ def enviar_respuesta(message, uid, tipo):
         bot.send_message(MI_ID, f"No se pudo enviar: {e}")
 
 # ==========================================
-# 9. COMANDOS — ADMIN DINAMICA
 # ==========================================
-@bot.message_handler(commands=['setdinamica'])
-def cmd_setdinamica(message):
-    if message.chat.id != MI_ID:
-        return
-    partes = message.text.split(maxsplit=1)
-    if len(partes) < 2:
-        bot.reply_to(message,
-            "Formato: /setdinamica [descripcion]\n\n"
-            "Ejemplo:\n/setdinamica 🎉 Si ganaste la dinamica, envia tu captura de pantalla y que es lo que ganaste."
-        )
-        return
-    set_config("dinamica", partes[1])
-    bot.reply_to(message, "✦ Dinamica activada. Los usuarios ya pueden usar /dinamica.")
-
-@bot.message_handler(commands=['enddinamica'])
-def cmd_enddinamica(message):
-    if message.chat.id != MI_ID:
-        return
-    if get_config("dinamica") is None:
-        bot.reply_to(message, "No hay ninguna dinamica activa.")
-        return
-    del_config("dinamica")
-    bot.reply_to(message, "✦ Dinamica cerrada.")
-
-# ==========================================
-# 10. COMANDOS — USUARIO
-# ==========================================
-@bot.message_handler(commands=['me'])
-def cmd_me(message):
-    u = message.from_user
-    user_id  = u.id
-    nombre   = u.first_name or ""
-    username = f"@{u.username}" if u.username else "Sin usuario"
-    texto = (
-        "【✦】•━【𝙵𝚕𝚊𝚖𝚒𝚎 𝚂𝚙𝚎𝚎𝚍𝚍𝚛𝚊𝚠】━•【✦】\n"
-        f"╰┈➤ 𝐈𝐃 ➟ <code>{user_id}</code>\n"
-        f"╰┈➤ 𝐍𝐨𝐦𝐛𝐫𝐞 ➟ {html.escape(nombre)}\n"
-        f"╰┈➤ 𝐔𝐬𝐮𝐚𝐫𝐢𝐨 ➟ {html.escape(username)}\n"
-        "【✦】•━【𝙵𝚕𝚊𝚖𝚒𝚎 𝚂𝚙𝚎𝚎𝚍𝚍𝚛𝚊𝚠】━•【✦】"
-    )
-    bot.reply_to(message, texto, parse_mode='HTML')
-
-@bot.message_handler(commands=['estado'])
-def cmd_estado(message):
-    if message.chat.id == MI_ID:
-        return
-    fecha = date.today().strftime("%Y-%m-%d")
-    count = query(
-        "SELECT COUNT(*) FROM mensajes WHERE user_id=? AND fecha=?",
-        (message.from_user.id, fecha)
-    )[0][0]
-    if count:
-        bot.reply_to(message,
-            "✦ Tu mensaje fue recibido correctamente.\n"
-            "MsTarantula te respondera en cuanto pueda.\n"
-            "No es necesario escribir de nuevo."
-        )
-    else:
-        bot.reply_to(message,
-            "✦ Aun no hay mensajes tuyos registrados hoy.\n"
-            "Puedes escribir tu consulta y sera atendida."
-        )
-
-@bot.message_handler(commands=['dinamica'])
-def cmd_dinamica(message):
-    if message.chat.id == MI_ID:
-        info = get_config("dinamica")
-        bot.reply_to(message, f"Dinamica activa:\n\n{info}" if info else "No hay dinamica activa. Usa /setdinamica para crear una.")
-    # Usuarios externos: ya no se responde aqui, solo pueden ver la dinamica
-    # tocando el boton "🎁 Dinámica" en /cmds.
-
-# ==========================================
-# 11. ARCHIVOS MULTIMEDIA
+# 9. ARCHIVOS MULTIMEDIA
 # ==========================================
 @bot.message_handler(content_types=['photo'])
 def recibir_foto(message):
@@ -923,10 +744,8 @@ def comandos_moderacion(message):
 # 11.2 COMANDOS PERSONALIZADOS PERSISTENTES
 # ==========================================
 COMANDOS_RESERVADOS = {
-    "start", "cmds", "reload", "silenciar", "borrar", "stats", "hoy",
-    "resumen", "setdinamica", "enddinamica", "me", "estado", "dinamica",
-    "ban", "mute", "restrict", "kick", "promote", "q", "addcmd",
-    "delcmd", "listcmd",
+    "start", "help", "cmds", "activar", "info", "id", "limpiar", "q",
+    "ban", "mute", "restrict", "kick", "promote", "addcmd", "delcmd", "listcmd",
 }
 COMANDO_SLASH_RE = re.compile(r"^\s*/([A-Za-z][A-Za-z0-9_]{0,31})(?:@[A-Za-z0-9_]+)?(?:\s+|$)(.*)$", re.DOTALL)
 
@@ -979,6 +798,7 @@ def procesar_comando_personalizado(message):
                 con.commit()
             finally:
                 con.close()
+            registrar_comandos_menu()
             bot.reply_to(message, f"Comando /{comando} guardado y disponible.")
             return
         if nombre == "delcmd":
@@ -993,6 +813,8 @@ def procesar_comando_personalizado(message):
                 eliminado = cursor.rowcount
             finally:
                 con.close()
+            if eliminado:
+                registrar_comandos_menu()
             bot.reply_to(message, f"Comando /{comando} eliminado." if eliminado else f"No existe /{comando}.")
             return
         filas = query("SELECT command FROM custom_commands ORDER BY command")
@@ -1158,7 +980,7 @@ def guardaespaldas(message):
     if message.chat.type != "private":
         return
     if message.chat.id == MI_ID:
-        bot.send_message(MI_ID, "Comando no reconocido. Usa /cmds para ver las opciones.")
+        bot.send_message(MI_ID, "Comando no reconocido. Usa /help para ver las opciones.")
         return
 
     uid      = message.from_user.id
@@ -1283,7 +1105,7 @@ def guardaespaldas(message):
         bot.reply_to(message,
             "✦ Tu mensaje fue recibido.\n"
             "MsTarantula te respondera en cuanto pueda.\n\n"
-            "Usa /estado para verificar el estado de tu mensaje.\n"
+            "Usa /help para consultar las funciones disponibles.\n"
             "No es necesario escribir de nuevo."
         )
         marcar_notificado(message.chat.id)
@@ -1305,7 +1127,8 @@ def guardaespaldas(message):
 if __name__ == "__main__":
     try:
         print("Iniciando Flamie Bot...")
-        print("Anti-spam activo | Analisis IA | Respuesta directa | Espera de codigos\n")
+        print("Moderacion | Stickers | Flujo de activacion\n")
+        registrar_comandos_menu()
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except KeyboardInterrupt:
         print("\nBot detenido.")

@@ -250,6 +250,27 @@ async def registrar_mis_mensajes(client, message: Message):
     if message.chat.id not in chats_iniciados_por_mi:
         chats_iniciados_por_mi.add(message.chat.id)
 
+
+@app.on_message(filters.private & filters.incoming & filters.user(BOT_ID))
+async def limpiar_historial_confirmado(client, message: Message):
+    """Limpia solo la copia local del chat con el bot tras la confirmacion del propietario."""
+    if message.chat.id != BOT_ID or message.text != "/__limpiar_confirmado":
+        return
+
+    try:
+        ids_mensajes = []
+        async for mensaje in client.get_chat_history(BOT_ID):
+            ids_mensajes.append(mensaje.id)
+
+        for inicio in range(0, len(ids_mensajes), 100):
+            await client.delete_messages(
+                BOT_ID,
+                ids_mensajes[inicio:inicio + 100],
+                revoke=False,
+            )
+    except Exception as exc:
+        print(f"[ERROR] No se pudo limpiar el historial del bot: {type(exc).__name__}")
+
 # ==========================================
 # 4. INTERCEPTAR MENSAJES PRIVADOS ENTRANTES
 # ==========================================
