@@ -1,7 +1,7 @@
 import os
-import pyrogram
+import asyncio
+import html
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
 
 # --- PARCHE PARA PYROGRAM (Nuevos IDs de Telegram) ---
 # Telegram ha expandido los IDs de grupos a rangos que Pyrogram v2.x 
@@ -18,19 +18,22 @@ def get_peer_type_new(peer_id: int) -> str:
 utils.get_peer_type = get_peer_type_new
 # -----------------------------------------------------
 
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import SessionPasswordNeeded
-from pathlib import Path
+from pyrogram.types import Message
 import time
 import requests
 import json
+import logging
+
+from flamie.core.config import BASE_DIR, DATA_DIR, BOT_PUBLIC_USERNAME, BOT_PUBLIC_LINK, OWNER_DISPLAY_NAME, OWNER_ALIAS
+from flamie.database.db import init_db, load_userbot_respondidos, mark_userbot_respondido
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+init_db()
 
 # ==========================================
 # 1. CREDENCIALES Y CONFIGURACION
 # ==========================================
-BASE_DIR = Path(__file__).resolve().parent
-
-
 def cargar_env_local():
     env_path = BASE_DIR / ".env"
     if not env_path.exists():
@@ -49,7 +52,7 @@ cargar_env_local()
 def _require_env(name):
     value = os.getenv(name)
     if not value:
-        print(f"[ERROR] Falta la variable de entorno: {name}")
+        logger.error("Falta la variable de entorno: %s", name)
         raise RuntimeError(f"Falta la variable de entorno: {name}")
     return value
 
@@ -57,12 +60,11 @@ def _require_env(name):
 try:
     API_ID = int(_require_env("PYROGRAM_API_ID"))
     API_HASH = _require_env("PYROGRAM_API_HASH")
-    MI_BOT = "@Flamie_SpeeddrawBot"
     BOT_TOKEN = _require_env("TELEGRAM_BOT_TOKEN")
     MI_ID = int(_require_env("TELEGRAM_OWNER_ID"))
     BOT_ID = int(BOT_TOKEN.split(':')[0])
 except Exception as e:
-    print(f"[ERROR] No se pudieron cargar las variables de entorno requeridas: {e}")
+    logger.exception("No se pudieron cargar las variables requeridas")
     raise
 
 SESSION_NAME = os.getenv("PYROGRAM_SESSION_NAME", "mi_sesion")
@@ -72,26 +74,26 @@ if SESSION_NAME.endswith(".session"):
 # En servidor (Railway): usa StringSession desde variable de entorno
 # En local: usa el archivo .session
 SESSION_STRING = os.getenv("PYROGRAM_SESSION_STRING", "").strip()
-SESSION_FILE = BASE_DIR / f"{SESSION_NAME}.session"
+SESSION_FILE = DATA_DIR / f"{SESSION_NAME}.session"
+LEGACY_SESSION_FILE = BASE_DIR / f"{SESSION_NAME}.session"
 
 if SESSION_STRING:
-    print("[USERBOT] Modo servidor: usando StringSession desde variable de entorno.")
+    logger.info("Modo servidor: usando StringSession desde variable de entorno")
     app = Client(
         name="bot_session",
         api_id=API_ID,
         api_hash=API_HASH,
         session_string=SESSION_STRING,
     )
-elif SESSION_FILE.exists():
-    print(f"[USERBOT] Modo local: usando archivo de sesion {SESSION_FILE}")
-    app = Client(str(BASE_DIR / SESSION_NAME), api_id=API_ID, api_hash=API_HASH)
+elif SESSION_FILE.exists() or LEGACY_SESSION_FILE.exists():
+    session_path = SESSION_FILE if SESSION_FILE.exists() else LEGACY_SESSION_FILE
+    logger.info("Modo local: usando archivo de sesión %s", session_path)
+    app = Client(str(session_path.with_suffix("")), api_id=API_ID, api_hash=API_HASH)
 else:
-    print("[ERROR CRITICO] No se encontro sesion de Pyrogram.")
-    print("  - En Railway: agrega la variable PYROGRAM_SESSION_STRING")
-    print("  - En local: ejecuta generar_session_string.py primero")
+    logger.critical("No se encontró sesión de Pyrogram; configura PYROGRAM_SESSION_STRING en Railway o genera la sesión local")
     import sys as _sys
     _sys.exit(1)
-usuarios_respondidos = set()
+usuarios_respondidos = load_userbot_respondidos()
 
 # Cache del file_id del GIF de respuesta automatica. Pyrogram, igual que el
 # bot, vuelve a subir el archivo local cada vez si no se reutiliza el file_id
@@ -102,7 +104,7 @@ _gif_id_cache = {"FlamieSpeedDraw.gif": None}
 # ==========================================
 # 2. NOTIFICAR AL BOT (con foto de perfil)
 # ==========================================
-def _notificar_fallback(user_id, nombre, contenido, tipo):
+async def _notificar_fallback(user_id, nombre, contenido, tipo):
     """Fallback via Bot API REST si Pyrogram falla."""
     hora = time.strftime('%H:%M:%S')
     iconos = {
@@ -113,20 +115,22 @@ def _notificar_fallback(user_id, nombre, contenido, tipo):
     cuerpo = (
         f"{icono} <b>Mensaje directo</b>  •  <code>{hora}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 <b>De:</b> <a href='tg://user?id={user_id}'>{nombre}</a>\n"
+        f"👤 <b>De:</b> <a href='tg://user?id={user_id}'>{html.escape(nombre)}</a>\n"
         f"🆔 <b>ID:</b> <code>{user_id}</code>\n\n"
-        f"📝 <b>Contenido:</b> {contenido}\n\n"
+        f"📝 <b>Contenido:</b> {html.escape(contenido)}\n\n"
         f"↩️ <code>/r {user_id} [respuesta]</code>"
     )
     teclado = {"inline_keyboard": [[{"text": "💬 DM", "callback_data": f"resp:dm:{user_id}"}]]}
     try:
-        requests.post(
+        response = await asyncio.to_thread(requests.post,
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json={"chat_id": MI_ID, "text": cuerpo, "parse_mode": "HTML", "reply_markup": teclado},
             timeout=10
         )
+        if response.status_code != 200:
+            logger.warning("Telegram rechazó el aviso alternativo; estado HTTP %s", response.status_code)
     except Exception as e:
-        print(f"[ERROR] _notificar_fallback: {e}")
+        logger.exception("Falló el aviso alternativo al bot principal")
 
 
 async def notificar_con_foto(client, message: Message, user_id, nombre, contenido, tipo):
@@ -149,15 +153,17 @@ async def notificar_con_foto(client, message: Message, user_id, nombre, contenid
     }
     icono, etiqueta = iconos_tipo.get(tipo, ("📨", "Mensaje directo"))
 
+    contenido_html = html.escape(contenido)
+    nombre_html = html.escape(nombre)
     if tipo == "texto":
-        linea_contenido = f"💬 <b>Dice:</b>\n<blockquote>{contenido}</blockquote>"
+        linea_contenido = f"💬 <b>Dice:</b>\n<blockquote>{contenido_html}</blockquote>"
     else:
-        linea_contenido = f"{icono} <b>Contenido:</b> {contenido}"
+        linea_contenido = f"{icono} <b>Contenido:</b> {contenido_html}"
 
     caption = (
         f"{icono} <b>{etiqueta}</b>  ·  <code>{hora}</code>\n"
         f"────────────────────\n"
-        f"👤 <a href='tg://user?id={user_id}'><b>{nombre}</b></a>\n"
+        f"👤 <a href='tg://user?id={user_id}'><b>{nombre_html}</b></a>\n"
         f"🆔 <code>{user_id}</code>\n\n"
         f"{linea_contenido}\n\n"
         f"↩️ <code>/r {user_id} [respuesta]</code>"
@@ -171,13 +177,13 @@ async def notificar_con_foto(client, message: Message, user_id, nombre, contenid
             foto_bytes = await client.download_media(foto, in_memory=True)
             break
     except Exception as e:
-        print(f"[DEBUG] Sin foto de perfil para {user_id}: {e}")
+        logger.debug("No se pudo obtener foto de perfil para user_id=%s", user_id, exc_info=True)
 
     # --- Enviar notificación via Bot API (va al chat del bot, no a Guardados) ---
     try:
         if foto_bytes:
             foto_bytes.seek(0)
-            r = requests.post(
+            r = await asyncio.to_thread(requests.post,
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
                 data={
                     "chat_id": MI_ID,
@@ -188,11 +194,11 @@ async def notificar_con_foto(client, message: Message, user_id, nombre, contenid
                 files={"photo": ("profile.jpg", foto_bytes, "image/jpeg")},
                 timeout=15,
             )
-            print(f"[{hora}] Notificación con foto enviada: {r.status_code}")
+            logger.info("Notificación con foto enviada; estado HTTP %s", r.status_code)
             if r.status_code != 200:
-                print(f"[DEBUG] Error Bot API: {r.text}")
+                logger.warning("Telegram rechazó la notificación con foto; estado HTTP %s", r.status_code)
         else:
-            r = requests.post(
+            r = await asyncio.to_thread(requests.post,
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                 json={
                     "chat_id": MI_ID,
@@ -202,11 +208,11 @@ async def notificar_con_foto(client, message: Message, user_id, nombre, contenid
                 },
                 timeout=10,
             )
-            print(f"[{hora}] Notificación texto enviada: {r.status_code}")
+            logger.info("Notificación de texto enviada; estado HTTP %s", r.status_code)
             if r.status_code != 200:
-                print(f"[DEBUG] Error Bot API: {r.text}")
+                logger.warning("Telegram rechazó la notificación de texto; estado HTTP %s", r.status_code)
     except Exception as e:
-        print(f"[{hora}] Error en notificar_con_foto: {e}")
+        logger.exception("Falló el envío de la notificación")
 
     # --- Reenviar el archivo real si es multimedia (descarga + re-subida via Bot API) ---
     if tipo in ("foto", "video", "audio", "documento", "sticker"):
@@ -216,27 +222,27 @@ async def notificar_con_foto(client, message: Message, user_id, nombre, contenid
             url_base = f"https://api.telegram.org/bot{BOT_TOKEN}"
             data_base = {"chat_id": MI_ID}
             if message.photo:
-                requests.post(f"{url_base}/sendPhoto",
+                await asyncio.to_thread(requests.post, f"{url_base}/sendPhoto",
                     data=data_base, files={"photo": ("foto.jpg", media_bytes, "image/jpeg")}, timeout=30)
             elif message.video:
-                requests.post(f"{url_base}/sendVideo",
+                await asyncio.to_thread(requests.post, f"{url_base}/sendVideo",
                     data=data_base, files={"video": ("video.mp4", media_bytes, "video/mp4")}, timeout=60)
             elif message.voice:
-                requests.post(f"{url_base}/sendVoice",
+                await asyncio.to_thread(requests.post, f"{url_base}/sendVoice",
                     data=data_base, files={"voice": ("voz.ogg", media_bytes, "audio/ogg")}, timeout=30)
             elif message.audio:
-                requests.post(f"{url_base}/sendAudio",
+                await asyncio.to_thread(requests.post, f"{url_base}/sendAudio",
                     data=data_base, files={"audio": ("audio.mp3", media_bytes, "audio/mpeg")}, timeout=30)
             elif message.document:
                 fname = getattr(message.document, 'file_name', None) or "archivo"
-                requests.post(f"{url_base}/sendDocument",
+                await asyncio.to_thread(requests.post, f"{url_base}/sendDocument",
                     data=data_base, files={"document": (fname, media_bytes, "application/octet-stream")}, timeout=60)
             elif message.sticker:
-                requests.post(f"{url_base}/sendSticker",
+                await asyncio.to_thread(requests.post, f"{url_base}/sendSticker",
                     data=data_base, files={"sticker": ("sticker.webp", media_bytes, "image/webp")}, timeout=30)
-            print(f"[{hora}] Media reenviada al dueño via Bot API.")
+            logger.info("Media reenviada al propietario mediante Bot API")
         except Exception as e:
-            print(f"[{hora}] Error al reenviar media: {e}")
+            logger.exception("Falló el reenvío de media")
 
 # Chats donde el dueño de la cuenta escribio primero (no responder automaticamente)
 chats_iniciados_por_mi = set()
@@ -269,7 +275,7 @@ async def limpiar_historial_confirmado(client, message: Message):
                 revoke=False,
             )
     except Exception as exc:
-        print(f"[ERROR] No se pudo limpiar el historial del bot: {type(exc).__name__}")
+        logger.warning("No se pudo limpiar el historial del bot (%s)", type(exc).__name__)
 
 # ==========================================
 # 4. INTERCEPTAR MENSAJES PRIVADOS ENTRANTES
@@ -278,16 +284,16 @@ async def limpiar_historial_confirmado(client, message: Message):
 async def interceptar(client, message: Message):
     try:
         user_id = message.from_user.id
-        print(f"[DEBUG] Mensaje privado interceptado: user_id={user_id}, MI_ID={MI_ID}")
+        logger.debug("Mensaje privado interceptado: user_id=%s", user_id)
 
         # ANTI-BUCLE: ignorar mensajes del propio bot
         if user_id == BOT_ID:
-            print(f"[DEBUG] Ignorado: es del bot")
+            logger.debug("Mensaje ignorado: procede del bot")
             return
         
         # Ignorar si el mensaje lo envio el propio dueno de la cuenta
         if user_id == MI_ID:
-            print(f"[DEBUG] Ignorado: es del dueno de la cuenta")
+            logger.debug("Mensaje ignorado: procede de la cuenta propietaria")
             return
 
         nombre   = message.from_user.first_name
@@ -322,7 +328,7 @@ async def interceptar(client, message: Message):
             tipo = "texto"
             contenido = "[Mensaje desconocido]"
 
-        print(f"[{time.strftime('%H:%M:%S')}] Directo de {nombre_completo}: {contenido}")
+        logger.info("Mensaje directo recibido de user_id=%s", user_id)
 
         # Notificar al dueño con foto de perfil + reenviar media si aplica
         await notificar_con_foto(client, message, user_id, nombre_completo, contenido, tipo)
@@ -336,8 +342,9 @@ async def interceptar(client, message: Message):
                 "╭┈➤Nᴏ Aᴄᴇᴘᴛᴏ Mᴇɴsᴀᴊᴇs Dɪʀᴇᴄᴛᴏs.\n"
                 "│━━━━━━━━━━━━━━━━━━━━\n"
                 "│Sɪ Tɪᴇɴᴇs Uɴᴀ Sᴏʟɪᴄɪᴛᴜᴅ\n"
-                "│Esᴄʀɪʙᴇ A Mɪ Bᴏᴛ Oғɪᴄɪᴀʟ \n"
-                "│✧๑⋅@Flamie_SpeeddrawBot⋅๑✧\n"
+                f"│Esᴄʀɪʙᴇ A Mɪ Bᴏᴛ Oғɪᴄɪᴀʟ: {BOT_PUBLIC_USERNAME}\n"
+                f"│{BOT_PUBLIC_LINK}\n"
+                f"│✧๑⋅{OWNER_DISPLAY_NAME} {OWNER_ALIAS}⋅๑✧\n"
                 "│━━━━━━━━━━━━━━━━━━━━\n"
                 "╰┈➤Tᴜ Mᴇɴsᴀᴊᴇ Nᴏ Sᴇʀᴀ Lᴇɪᴅᴀ Aqᴜɪ.\n"
                 "【✦】•━【𝙵𝚕𝚊𝚖𝚒𝚎 𝚂𝚙𝚎𝚎𝚍𝚍𝚛𝚊𝚠】━•【✦】"
@@ -351,24 +358,23 @@ async def interceptar(client, message: Message):
                 if not file_id and enviado and enviado.animation:
                     _gif_id_cache[ARCHIVO_GIF] = enviado.animation.file_id
             except Exception as e:
-                print(f"No se pudo enviar el GIF: {e}")
+                logger.exception("No se pudo enviar el GIF de respuesta automática")
                 try:
                     await message.reply_text(texto_respuesta)
                 except Exception as e2:
-                    print(f"Error al enviar texto: {e2}")
+                    logger.exception("No se pudo enviar el texto alternativo")
 
             usuarios_respondidos.add(user_id)
-            print(f"[{time.strftime('%H:%M:%S')}] Respuesta automatica enviada a {nombre_completo}")
+            mark_userbot_respondido(user_id)
+            logger.info("Respuesta automática enviada a user_id=%s", user_id)
         else:
             if yo_inicie:
-                print(f"[{time.strftime('%H:%M:%S')}] {nombre_completo} responde a un chat que TU iniciaste. Sin respuesta automatica.")
+                logger.info("Respuesta automática omitida: el propietario inició el chat (user_id=%s)", user_id)
             else:
-                print(f"[{time.strftime('%H:%M:%S')}] {nombre_completo} ya fue respondido. Solo notificado.")
+                logger.info("Usuario ya había recibido respuesta automática (user_id=%s)", user_id)
     
     except Exception as e:
-        print(f"[ERROR] Error en handler interceptar: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Error en handler de mensajes privados")
 
 # ==========================================
 # 4. ARRANQUE
@@ -376,15 +382,11 @@ async def interceptar(client, message: Message):
 def iniciar_userbot():
     """Inicia el userbot con Pyrogram."""
     try:
-        print("Iniciando el Recepcionista (Cuenta Personal)...")
-        print(f"Ignorando mensajes del bot ID: {BOT_ID}")
-        print("Credenciales requeridas cargadas.")
+        logger.info("Iniciando recepcionista de la cuenta personal; ignorando bot_id=%s", BOT_ID)
         app.run()  # Ejecuta app.start() + idle()
         
     except Exception as e:
-        print(f"[ERROR] Fallo al iniciar userbot: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Falló el arranque del userbot")
         raise
 
 if __name__ == "__main__":

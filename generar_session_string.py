@@ -28,6 +28,8 @@ def cargar_env_local():
 
 
 cargar_env_local()
+DATA_DIR = Path(os.getenv("DATA_DIR") or (BASE_DIR / "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 API_ID   = os.getenv("PYROGRAM_API_ID")
 API_HASH = os.getenv("PYROGRAM_API_HASH")
@@ -38,7 +40,7 @@ if not API_ID or not API_HASH:
 
 from pyrogram import Client
 
-SESSION_TEMP = str(BASE_DIR / "_temp_gen_session")
+SESSION_TEMP = str(DATA_DIR / "_temp_gen_session")
 
 print("=" * 55)
 print("  GENERADOR DE STRINGSESSION — FLAMIE BOT")
@@ -57,7 +59,7 @@ finally:
     # Limpiar archivos temporales de sesión
     import os as _os
     for ext in [".session", ".session-journal"]:
-        p = BASE_DIR / f"_temp_gen_session{ext}"
+        p = DATA_DIR / f"_temp_gen_session{ext}"
         if p.exists():
             _os.remove(p)
 

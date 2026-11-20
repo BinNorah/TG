@@ -1,84 +1,91 @@
 #!/usr/bin/env python3
-"""
-Archivo principal para Railway. Orquesta bot.py y userbot.py sin conflictos.
-"""
+"""Supervisa y reinicia los procesos del sistema Flamie en Railway."""
+import atexit
+import logging
+import signal
 import subprocess
 import sys
-import signal
-import atexit
+import threading
 import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("flamie.supervisor")
+PROCESSES = {}
+SHUTTING_DOWN = False
+RESTART_DELAY = 5
+MAX_RESTART_DELAY = 60
+STOP_EVENT = threading.Event()
 
-# Procesos a manejar
-bot_proc = None
-userbot_proc = None
+
+def start_process(name, script):
+    logger.info("Iniciando %s (%s)", name, script)
+    return subprocess.Popen(
+        [sys.executable, str(BASE_DIR / script)],
+        cwd=str(BASE_DIR),
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
+
 
 def cleanup():
-    """Termina ambos procesos limpiamente."""
-    global bot_proc, userbot_proc
-    for proc in [bot_proc, userbot_proc]:
-        if proc and proc.poll() is None:
+    """Detiene los procesos secundarios cuando Railway apaga el servicio."""
+    for name, proc in list(PROCESSES.items()):
+        if proc.poll() is None:
+            logger.info("Deteniendo %s", name)
+            proc.terminate()
+    for proc in list(PROCESSES.values()):
+        if proc.poll() is None:
             try:
-                proc.terminate()
                 proc.wait(timeout=5)
-            except:
+            except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
+
+
+def request_shutdown(_signum, _frame):
+    global SHUTTING_DOWN
+    SHUTTING_DOWN = True
+    STOP_EVENT.set()
+
 
 def main():
-    global bot_proc, userbot_proc
-    
+    signal.signal(signal.SIGINT, request_shutdown)
+    signal.signal(signal.SIGTERM, request_shutdown)
     atexit.register(cleanup)
-    signal.signal(signal.SIGINT, lambda s, f: (cleanup(), sys.exit(0)))
-    signal.signal(signal.SIGTERM, lambda s, f: (cleanup(), sys.exit(0)))
-    
-    print("=" * 50)
-    print("INICIANDO SISTEMA FLAMIE")
-    print("=" * 50)
-    
-    try:
-        # Lanzar userbot en BACKGROUND (subprocess)
-        print("[MAIN] Iniciando Recepcionista (userbot)...")
-        userbot_proc = subprocess.Popen(
-            [sys.executable, str(BASE_DIR / "userbot.py")],
-            cwd=str(BASE_DIR),
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-        
-        # Esperar a que userbot se conecte (Pyrogram establece conexión)
-        print("[MAIN] Esperando a que userbot se conecte (5s)...")
-        time.sleep(5)
-        
-        # Verificar que el userbot no haya crasheado antes de continuar
-        if userbot_proc.poll() is not None:
-            print(f"[ERROR] El userbot terminó prematuramente (código: {userbot_proc.returncode}).")
-            print("[MAIN] Continuando de todas formas con el bot principal...")
-        else:
-            print("[MAIN] Userbot corriendo correctamente.")
-        
-        # Lanzar bot en FOREGROUND (bloquea aquí)
-        print("[MAIN] Iniciando Bot Principal (bot.py)...\n")
-        bot_proc = subprocess.Popen(
-            [sys.executable, str(BASE_DIR / "bot.py")],
-            cwd=str(BASE_DIR),
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-        
-        # Esperar a que bot termine
-        bot_proc.wait()
-        
-    except KeyboardInterrupt:
-        print("\n[MAIN] Sistema detenido por usuario.")
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        cleanup()
-        print("[MAIN] Sistema apagado.")
+
+    logger.info("Iniciando sistema Flamie")
+
+    scripts = {"Recepcionista (userbot)": "userbot.py", "Bot Principal": "bot.py"}
+    for name, script in scripts.items():
+        PROCESSES[name] = start_process(name, script)
+
+    attempts = {name: 0 for name in scripts}
+    restart_at = {name: 0.0 for name in scripts}
+    started_at = {name: time.monotonic() for name in scripts}
+    while not SHUTTING_DOWN:
+        now = time.monotonic()
+        for name, script in scripts.items():
+            proc = PROCESSES[name]
+            return_code = proc.poll()
+            if return_code is not None and not SHUTTING_DOWN:
+                if restart_at[name] == 0.0:
+                    delay = min(RESTART_DELAY * (2 ** min(attempts[name], 8)), MAX_RESTART_DELAY)
+                    attempts[name] += 1
+                    restart_at[name] = now + delay
+                    logger.error("%s terminó con código %s; reintentará en %ss", name, return_code, delay)
+                elif now >= restart_at[name] and not SHUTTING_DOWN:
+                    PROCESSES[name] = start_process(name, script)
+                    restart_at[name] = 0.0
+                    started_at[name] = now
+            elif return_code is None and now - started_at[name] >= 60:
+                attempts[name] = 0
+        STOP_EVENT.wait(1)
+
+    logger.info("Apagado solicitado; deteniendo procesos")
+    cleanup()
+
 
 if __name__ == "__main__":
     main()
