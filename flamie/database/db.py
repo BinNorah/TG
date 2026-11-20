@@ -200,11 +200,11 @@ def init_db():
                 chat_type TEXT NOT NULL DEFAULT 'group',
                 last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )""")
-            con.execute("CREATE TABLE IF NOT EXISTS global_bans (
+            con.execute("""CREATE TABLE IF NOT EXISTS global_bans (
                 user_id INTEGER PRIMARY KEY,
                 reason TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )")
+            )""")
             con.execute(
                 "INSERT INTO schema_version(singleton,version) VALUES (1,7) "
                 "ON CONFLICT(singleton) DO UPDATE SET version=excluded.version"
