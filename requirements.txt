@@ -4,4 +4,5 @@ requests==2.34.2
 TgCrypto==1.2.5
 Pillow==13.0.0
 gTTS==2.5.4
+langdetect==1.0.9
 

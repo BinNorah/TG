@@ -65,13 +65,16 @@ def register_fun(bot):
             if not module_enabled_for_message(message, "fun"):
                 return
             question, options, answer = random.choice(QUIZ)
-            nonce = int(time.time()) % 1000000
-            keyboard = telebot.types.InlineKeyboardMarkup(row_width=2)
-            buttons = [telebot.types.InlineKeyboardButton(
-                option, callback_data=f"funquiz:{nonce}:{index}:{answer}"
-            ) for index, option in enumerate(options)]
-            keyboard.add(*buttons)
-            bot.send_message(message.chat.id, f"🧠 <b>Quiz</b>\n{html.escape(question)}", parse_mode="HTML", reply_markup=keyboard, reply_to_message_id=message.message_id)
+            bot.send_poll(
+                message.chat.id,
+                question,
+                options,
+                type="quiz",
+                correct_option_id=answer,
+                is_anonymous=True,
+                explanation="¡Gracias por participar!",
+                reply_to_message_id=message.message_id,
+            )
         except Exception:
             logger.exception("Falló /quiz")
             bot.reply_to(message, "No pude iniciar el quiz.")

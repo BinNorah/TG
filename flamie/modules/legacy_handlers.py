@@ -143,6 +143,7 @@ def registrar_comandos_menu():
         ("del", "Borra el mensaje respondido"), ("pin", "Fija el mensaje respondido"),
         ("unpin", "Desfija un mensaje"), ("unallpin", "Desfija todos los mensajes"),
         ("setrules", "Define las reglas del grupo"), ("clearrules", "Elimina las reglas"),
+        ("tag", "Asigna un apodo local a un usuario"), ("untag", "Quita el apodo local de un usuario"),
     ]
     propietario = [
         ("limpiar", "Limpia este historial con confirmacion"),
@@ -248,7 +249,7 @@ def texto_panel_ayuda(panel, user_id, chat_id, chat_type):
         "utilidades": "Utilidades\n/tr idioma texto — Traduce; /tts texto — Genera audio.\n/clima ciudad, /calc expresión, /wiki tema, /uinfo — Consultas y cálculo.\n/recordar 10m texto — Recordatorio persistente. /afk [motivo] — Estado AFK.\n/encuesta pregunta | opción 1 | opción 2 — Crea una encuesta.\n/chatlink — Obtiene el enlace del grupo. /staff — Lista administradores.\n/get nombre o #nombre — Consulta una nota guardada. /activar — Solicita una activacion en privado.",
         "activacion": "Activacion\nPulsa Activacion para indicar la plataforma y enviar una solicitud. Tambien puedes usar /activar.",
         "moderacion": "Moderacion\n/ban, /tban, /unban, /kick — Banear, desbanear o expulsar.\n/mute, /tmute, /unmute, /restrict — Silencios y restricciones.\n/warn, /warns, /resetwarns, /warnconfig — Advertencias e historial.\n/purge — Borra varios mensajes. /report o @admin — Avisa a administradores.",
-        "adminchat": "Administracion del grupo\n/settings — Configura módulos, idioma y canal de logs.\n/setwelcome, /setgoodbye — Mensajes de entrada y salida. /captchaconfig — Tiempo del captcha.\n/filter, /unfilter, /save — Filtros y notas. /antilinks, /blockword, /blockcontent, /floodconfig — Antispam.\n/antiraid — Activa protección de ingresos masivos.\n/settitle, /setdescr — Edita la información del grupo; /setgtitle — título de administrador.\n/promote y /demote — Gestion de administradores.\n/setrules y /clearrules — Gestion de reglas.\n/del, /pin, /unpin, /unallpin — Herramientas de mensajes.",
+        "adminchat": "Administracion del grupo\n/settings — Configura módulos, idioma y canal de logs.\n/setwelcome, /setgoodbye — Mensajes de entrada y salida. /captchaconfig — Tiempo del captcha.\n/filter, /unfilter, /save — Filtros y notas. /antilinks, /blockword, /blockcontent, /floodconfig — Antispam.\n/antiraid — Activa protección de ingresos masivos.\n/settitle, /setdescr — Edita la información del grupo; /setgtitle — título de administrador.\n/promote y /demote — Gestion de administradores.\n/tag y /untag — Apodo local del bot para un usuario.\n/setrules y /clearrules — Gestion de reglas.\n/del, /pin, /unpin, /unallpin — Herramientas de mensajes.",
         "propietario": "Panel del propietario\n/limpiar — Limpia el historial privado en tu cuenta tras confirmacion.\n/addcmd nombre | respuesta, /delcmd nombre, /listcmd — Comandos personalizados.\n/stats, /grupos, /logs — Estado y registros. /broadcast — Anuncio a grupos.\n/gban y /ungban — Bloqueo global. /backup — Copia de la BD. /maintenance on|off — Mantenimiento.",
     }
     paneles_en = {
@@ -261,7 +262,7 @@ def texto_panel_ayuda(panel, user_id, chat_id, chat_type):
         "utilidades": "Utilities\n/tr language text — Translate; /tts text — Generate audio.\n/clima city, /calc expression, /wiki topic, /uinfo — Queries and calculation.\n/recordar 10m text — Persistent reminder. /afk [reason] — AFK status.\n/encuesta question | option 1 | option 2 — Create a poll.\n/chatlink — Get the group link. /staff — List administrators.\n/get name or #name — Retrieve a saved note. /activar — Request activation in private chat.",
         "activacion": "Activation\nChoose Activation to select a platform and send a request. You can also use /activar.",
         "moderacion": "Moderation\n/ban, /tban, /unban, /kick — Ban, unban, or remove a user.\n/mute, /tmute, /unmute, /restrict — Restrict users.\n/warn, /warns, /resetwarns, /warnconfig — Warnings and history.\n/purge — Delete several messages. /report or @admin — Notify admins.",
-        "adminchat": "Group administration\n/settings — Configure modules, language, and moderation log channel.\n/setwelcome, /setgoodbye — Entry and exit messages. /captchaconfig — Captcha timer.\n/filter, /unfilter, /save — Filters and notes. /antilinks, /blockword, /blockcontent, /floodconfig — Antispam.\n/antiraid — Protect against join bursts.\n/settitle, /setdescr — Edit group info; /setgtitle — set an admin title.\n/promote and /demote — Manage administrators.\n/setrules and /clearrules — Manage rules.\n/del, /pin, /unpin, /unallpin — Manage messages.",
+        "adminchat": "Group administration\n/settings — Configure modules, language, and moderation log channel.\n/setwelcome, /setgoodbye — Entry and exit messages. /captchaconfig — Captcha timer.\n/filter, /unfilter, /save — Filters and notes. /antilinks, /blockword, /blockcontent, /floodconfig — Antispam.\n/antiraid — Protect against join bursts.\n/settitle, /setdescr — Edit group info; /setgtitle — set an admin title.\n/promote and /demote — Manage administrators.\n/tag and /untag — Set or remove a bot-only nickname.\n/setrules and /clearrules — Manage rules.\n/del, /pin, /unpin, /unallpin — Manage messages.",
         "propietario": "Owner panel\n/limpiar — Clear your private history after confirmation.\n/addcmd name | response, /delcmd name, /listcmd — Custom commands.\n/stats, /grupos, /logs — Status and records. /broadcast — Group announcement.\n/gban and /ungban — Global ban. /backup — Database copy. /maintenance on|off — Maintenance.",
     }
     paneles_admin = {"moderacion", "adminchat"}
@@ -816,8 +817,14 @@ PERMISOS_ADMIN = {
 def usuario_es_admin(chat_id, user_id):
     if user_id == MI_ID:
         return True
-    miembro = get_chat_member_cached(bot, chat_id, user_id)
+    miembro = bot.get_chat_member(chat_id, user_id)
     return miembro.status in ("administrator", "creator")
+
+
+def _actor_id(message):
+    """ID para auditoría; 0 cuando Telegram oculta al autor por anonimato."""
+    usuario = getattr(message, "from_user", None)
+    return usuario.id if usuario else 0
 
 
 def resolver_objetivo(message, args):
@@ -911,7 +918,10 @@ def procesar_comando_moderacion(message):
         bot.reply_to(message, "Este comando debe usarse dentro del grupo.")
         return
     try:
-        if not usuario_es_admin(message.chat.id, message.from_user.id):
+        usuario = message.from_user
+        sender_chat = getattr(message, "sender_chat", None)
+        admin_anonimo = bool(sender_chat and sender_chat.id == message.chat.id)
+        if not admin_anonimo and (not usuario or not usuario_es_admin(message.chat.id, usuario.id)):
             bot.reply_to(message, "Solo los administradores del chat pueden usar este comando.")
             return
 
@@ -919,7 +929,7 @@ def procesar_comando_moderacion(message):
         if objetivo is None:
             bot.reply_to(message, f"Uso: responde al usuario o indica /{comando} ID o @usuario.")
             return
-        if objetivo == message.from_user.id:
+        if usuario and objetivo == usuario.id:
             bot.reply_to(message, "No puedes aplicar esta acción sobre ti mismo.")
             return
 
@@ -948,12 +958,12 @@ def procesar_comando_moderacion(message):
                     con.close()
                 limite = int(get_chat_setting(message.chat.id, "warn_limit", "3"))
                 accion_umbral = get_chat_setting(message.chat.id, "warn_action", "ban")
-                _registrar_accion_mod(message.chat.id, message.from_user.id, objetivo, "warn", motivo)
+                _registrar_accion_mod(message.chat.id, _actor_id(message), objetivo, "warn", motivo)
                 aviso = f"Advertencia {cuenta}/{limite} para <code>{objetivo}</code>. Motivo: {html.escape(motivo[:500])}."
                 if cuenta >= limite:
                     _aplicar_accion_umbral(message.chat.id, objetivo, accion_umbral)
                     _registrar_accion_mod(
-                        message.chat.id, message.from_user.id, objetivo,
+                        message.chat.id, _actor_id(message), objetivo,
                         f"warn_limit_{accion_umbral}", f"Límite de {limite} advertencias alcanzado",
                     )
                     aviso += f" Se aplicó la acción configurada: <b>{html.escape(accion_umbral)}</b>."
@@ -990,7 +1000,7 @@ def procesar_comando_moderacion(message):
             finally:
                 con.close()
             accion = "unwarn" if comando == "unwarn" else "resetwarns"
-            _registrar_accion_mod(message.chat.id, message.from_user.id, objetivo, accion, resto or "")
+            _registrar_accion_mod(message.chat.id, _actor_id(message), objetivo, accion, resto or "")
             bot.reply_to(message, f"Advertencias de <code>{objetivo}</code> eliminadas.", parse_mode="HTML")
             return
 
@@ -1013,14 +1023,14 @@ def procesar_comando_moderacion(message):
                 )
                 bot.restrict_chat_member(message.chat.id, objetivo, until_date=hasta, permissions=permisos)
                 respuesta = f"Usuario <code>{objetivo}</code> silenciado/restringido. Motivo: {html.escape(motivo[:500])}."
-            _registrar_accion_mod(message.chat.id, message.from_user.id, objetivo, comando, motivo, duracion)
+            _registrar_accion_mod(message.chat.id, _actor_id(message), objetivo, comando, motivo, duracion)
             bot.reply_to(message, respuesta, parse_mode="HTML")
             return
 
         if comando == "unban":
             motivo = resto or "Sin motivo indicado"
             bot.unban_chat_member(message.chat.id, objetivo, only_if_banned=True)
-            _registrar_accion_mod(message.chat.id, message.from_user.id, objetivo, "unban", motivo)
+            _registrar_accion_mod(message.chat.id, _actor_id(message), objetivo, "unban", motivo)
             bot.reply_to(message, f"Se retiró el baneo de <code>{objetivo}</code>.", parse_mode="HTML")
             return
 
@@ -1032,7 +1042,7 @@ def procesar_comando_moderacion(message):
                 can_send_other_messages=True, can_add_web_page_previews=True,
             )
             bot.restrict_chat_member(message.chat.id, objetivo, permissions=permisos)
-            _registrar_accion_mod(message.chat.id, message.from_user.id, objetivo, "unmute", resto or "")
+            _registrar_accion_mod(message.chat.id, _actor_id(message), objetivo, "unmute", resto or "")
             bot.reply_to(message, f"Se retiró el silencio de <code>{objetivo}</code>.", parse_mode="HTML")
             return
 
@@ -1052,7 +1062,7 @@ def procesar_comando_moderacion(message):
                     derechos["can_manage_chat"] = True
                 bot.promote_chat_member(message.chat.id, objetivo, **derechos)
                 respuesta = f"Usuario {objetivo} promovido."
-            _registrar_accion_mod(message.chat.id, message.from_user.id, objetivo, comando, resto)
+            _registrar_accion_mod(message.chat.id, _actor_id(message), objetivo, comando, resto)
             bot.reply_to(message, respuesta)
             return
 
@@ -1147,7 +1157,7 @@ def cmd_purge(message):
             except Exception:
                 logger.debug("No se pudo borrar message_id=%s durante /purge", message_id, exc_info=True)
         bot.send_message(message.chat.id, f"Se eliminaron {removed} mensajes.")
-        _registrar_accion_mod(message.chat.id, message.from_user.id, None, "purge", f"{removed} mensajes")
+        _registrar_accion_mod(message.chat.id, _actor_id(message), None, "purge", f"{removed} mensajes")
     except Exception:
         logger.exception("Falló /purge")
         bot.reply_to(message, "No pude completar la purga.")
@@ -1184,6 +1194,41 @@ def cmd_admin(message):
     except Exception:
         logger.exception("Falló /admin")
         bot.reply_to(message, "No pude avisar a los administradores.")
+
+
+@bot.message_handler(commands=["tag", "untag"])
+@require_permission(
+    bot, MI_ID, role="admin",
+    denial_text="Solo los administradores pueden asignar apodos locales.",
+)
+def cmd_tag_usuario(message):
+    try:
+        if message.chat.type == "private" or not module_enabled_for_message(message, "moderation"):
+            return
+        comando = (message.text or "").split()[0].split("@", 1)[0].lstrip("/").lower()
+        objetivo, apodo = resolver_objetivo(message, (message.text or "").partition(" ")[2].strip())
+        if objetivo is None:
+            bot.reply_to(message, "Responde al usuario con /tag apodo o usa /tag @usuario apodo.")
+            return
+        clave = f"user_tag:{objetivo}"
+        if comando == "untag":
+            set_chat_setting(message.chat.id, clave, None)
+            bot.reply_to(message, f"Se quitó el apodo local del usuario <code>{objetivo}</code>.", parse_mode="HTML")
+            return
+        if not apodo or len(apodo) > 32:
+            bot.reply_to(message, "Uso: responde al usuario con /tag apodo o usa /tag @usuario apodo (máximo 32 caracteres).")
+            return
+        set_chat_setting(message.chat.id, clave, apodo)
+        bot.reply_to(
+            message,
+            f"Apodo local guardado para <code>{objetivo}</code>: <b>{html.escape(apodo)}</b>. Se mostrará en /uinfo; no cambia el nombre de Telegram.",
+            parse_mode="HTML",
+        )
+    except ValueError as exc:
+        bot.reply_to(message, html.escape(str(exc)))
+    except Exception:
+        logger.exception("Falló /tag")
+        bot.reply_to(message, "No pude guardar ese apodo.")
 
 
 @bot.message_handler(commands=["report"])
@@ -1231,7 +1276,7 @@ def cmd_settitle(message):
             bot.reply_to(message, "Uso: /settitle <nuevo título del grupo>")
             return
         bot.set_chat_title(message.chat.id, title)
-        _registrar_accion_mod(message.chat.id, message.from_user.id, None, "settitle", title)
+        _registrar_accion_mod(message.chat.id, _actor_id(message), None, "settitle", title)
         bot.reply_to(message, "Título del grupo actualizado.")
     except Exception:
         logger.exception("Falló /settitle")
@@ -1252,7 +1297,7 @@ def cmd_setdescr(message):
             bot.reply_to(message, "Uso: /setdescr <descripción del grupo>")
             return
         bot.set_chat_description(message.chat.id, description)
-        _registrar_accion_mod(message.chat.id, message.from_user.id, None, "setdescr", description)
+        _registrar_accion_mod(message.chat.id, _actor_id(message), None, "setdescr", description)
         bot.reply_to(message, "Descripción del grupo actualizada.")
     except Exception:
         logger.exception("Falló /setdescr")
@@ -1281,7 +1326,7 @@ def cmd_setgtitle(message):
             bot.reply_to(message, "El usuario debe ser administrador del grupo.")
             return
         bot.set_chat_administrator_custom_title(message.chat.id, target.id, title)
-        _registrar_accion_mod(message.chat.id, message.from_user.id, target.id, "setgtitle", title)
+        _registrar_accion_mod(message.chat.id, _actor_id(message), target.id, "setgtitle", title)
         bot.reply_to(message, "Título de administrador actualizado.")
     except Exception:
         logger.exception("Falló /setgtitle")
@@ -1301,7 +1346,7 @@ COMANDOS_RESERVADOS = {
     "setdescr", "setwelcome", "setgoodbye", "captchaconfig", "antiraid", "filter", "unfilter",
     "save", "get", "antilinks", "floodconfig", "blockword", "blockcontent",
     "del", "pin", "unpin", "unallpin", "admin", "msg", "copy", "forward",
-    "welcome", "captcha", "setrules", "clearrules", "spam", "addcmd", "delcmd", "listcmd",
+    "welcome", "captcha", "setrules", "clearrules", "spam", "tag", "untag", "addcmd", "delcmd", "listcmd",
 }
 COMANDO_SLASH_RE = re.compile(r"^\s*/([A-Za-z][A-Za-z0-9_]{0,31})(?:@[A-Za-z0-9_]+)?(?:\s+|$)(.*)$", re.DOTALL)
 
@@ -1480,6 +1525,17 @@ def crear_sticker_cita(texto, nombre, foto_bytes=None):
         draw.text((40, y), linea, font=fuente_texto, fill=(239, 241, 245, 255))
         y += 20 if fuente_texto.size <= 16 else fuente_texto.size + 7
 
+    # Recorta el sticker al contenido para que represente solo la burbuja citada.
+    alto = max(180, min(512, y + 28))
+    lienzo = lienzo.crop((0, 0, 512, alto))
+    mascara = Image.new("L", (512, alto), 0)
+    ImageDraw.Draw(mascara).rounded_rectangle(
+        (10, 10, 502, alto - 10), radius=34, fill=255
+    )
+    alpha = lienzo.getchannel("A")
+    from PIL import ImageChops
+    lienzo.putalpha(ImageChops.multiply(alpha, mascara))
+
     salida = io.BytesIO()
     lienzo.save(salida, format="WEBP", quality=88, method=6)
     contenido = salida.getvalue()
@@ -1496,17 +1552,19 @@ def crear_sticker_cita(texto, nombre, foto_bytes=None):
 
 @bot.message_handler(commands=["q"])
 def cmd_quote(message):
-    if not module_enabled_for_message(message, "quote"):
-        return
-    citado = message.reply_to_message
-    if not citado or not citado.text:
-        bot.reply_to(message, "Responde con /q a un mensaje de texto para crear el sticker.")
-        return
     try:
+        if not module_enabled_for_message(message, "quote"):
+            return
+        citado = message.reply_to_message
+        texto = (getattr(citado, "text", None) or getattr(citado, "caption", None) or "").strip() if citado else ""
+        if not citado or not texto:
+            bot.reply_to(message, "Responde con /q al mensaje de texto o foto con descripción que quieres convertir en sticker.")
+            return
         usuario = citado.from_user
+        sender_chat = getattr(citado, "sender_chat", None)
         nombre = " ".join(
             parte for parte in [usuario.first_name, usuario.last_name] if parte
-        ) if usuario else "Usuario"
+        ) if usuario else (getattr(sender_chat, "title", None) or "Canal")
         foto = None
         if usuario:
             try:
@@ -1516,7 +1574,7 @@ def cmd_quote(message):
                     foto = io.BytesIO(bot.download_file(archivo.file_path))
             except Exception:
                 foto = None
-        sticker = crear_sticker_cita(citado.text, nombre, foto)
+        sticker = crear_sticker_cita(texto, nombre, foto)
         bot.send_sticker(message.chat.id, sticker, reply_to_message_id=message.message_id)
     except ImportError:
         bot.reply_to(message, "No esta instalada Pillow. Actualiza las dependencias del bot.")

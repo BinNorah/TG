@@ -12,7 +12,7 @@ from io import BytesIO
 
 import requests
 from flamie.database.db import get_db, query
-from flamie.modules.settings import chat_language, module_enabled_for_message
+from flamie.modules.settings import chat_language, get_chat_setting, module_enabled_for_message
 from flamie.utils.cache import get_chat_member_cached
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,31 @@ def _reply_text(message):
     if not replied:
         return ""
     return (replied.text or replied.caption or "").strip()
+
+
+def _translate_with_fallback(text, target):
+    """Traducción automática de respaldo cuando la instancia LibreTranslate falla."""
+    from langdetect import DetectorFactory, detect
+
+    DetectorFactory.seed = 0
+    source = detect(text)
+    target = target.split("-", 1)[0].lower()
+    if source == target:
+        return text
+    if len(text.encode("utf-8")) > 500:
+        raise ValueError("El servicio alternativo admite hasta 500 bytes por consulta.")
+    response = requests.get(
+        "https://api.mymemory.translated.net/get",
+        params={"q": text, "langpair": f"{source}|{target}", "mt": "1"},
+        headers=HTTP_HEADERS,
+        timeout=(3, 12),
+    )
+    response.raise_for_status()
+    data = response.json()
+    translated = (data.get("responseData") or {}).get("translatedText", "").strip()
+    if data.get("responseStatus") != 200 or not translated:
+        raise ValueError("El proveedor alternativo no devolvió una traducción.")
+    return translated
 
 
 def _calc_node(node, depth=0):
@@ -177,17 +202,21 @@ def register_utilities(bot, owner_id):
             api_key = os.getenv("LIBRETRANSLATE_API_KEY", "").strip()
             if api_key:
                 payload["api_key"] = api_key
-            response = requests.post(
-                f"{base_url}/translate", json=payload, headers=HTTP_HEADERS, timeout=(3, 12)
-            )
-            response.raise_for_status()
-            translated = response.json().get("translatedText", "")
-            if not translated:
-                raise ValueError("La API no devolvió una traducción.")
+            try:
+                response = requests.post(
+                    f"{base_url}/translate", json=payload, headers=HTTP_HEADERS, timeout=(3, 12)
+                )
+                response.raise_for_status()
+                translated = response.json().get("translatedText", "")
+                if not translated:
+                    raise ValueError("La API no devolvió una traducción.")
+            except Exception:
+                logger.warning("LibreTranslate no respondió; se probará el proveedor alternativo.", exc_info=True)
+                translated = _translate_with_fallback(text, target)
             bot.reply_to(message, html.escape(translated[:4000]), parse_mode="HTML")
         except Exception:
             logger.exception("Falló /tr")
-            bot.reply_to(message, "No pude traducirlo ahora. Comprueba que LIBRETRANSLATE_URL apunte a una instancia disponible y configura LIBRETRANSLATE_API_KEY si esa instancia lo requiere.")
+            bot.reply_to(message, "No pude traducirlo. El servicio alternativo puede estar temporalmente limitado; inténtalo de nuevo o indica un idioma destino, por ejemplo /tr es hello.")
 
     @bot.message_handler(commands=["tts"])
     def cmd_tts(message):
@@ -300,6 +329,7 @@ def register_utilities(bot, owner_id):
             member = get_chat_member_cached(bot, message.chat.id, target_id)
             user = member.user
             full_name = " ".join(x for x in [user.first_name, user.last_name] if x) or "Usuario"
+            nickname = get_chat_setting(message.chat.id, f"user_tag:{target_id}")
             username = f"@{user.username}" if user.username else "Sin username"
             bio = ""
             try:
@@ -309,8 +339,9 @@ def register_utilities(bot, owner_id):
                 status = member.status
             body = (
                 f"<b>Información del usuario</b>\nNombre: {html.escape(full_name)}\n"
-                f"Username: {html.escape(username)}\nID: <code>{target_id}</code>\n"
-                f"Estado en el grupo: {html.escape(status)}"
+                + (f"Apodo local: <b>{html.escape(nickname)}</b>\n" if nickname else "")
+                + f"Username: {html.escape(username)}\nID: <code>{target_id}</code>\n"
+                + f"Estado en el grupo: {html.escape(status)}"
             )
             bot.reply_to(message, body, parse_mode="HTML")
         except Exception:
