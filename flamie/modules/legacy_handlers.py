@@ -17,7 +17,7 @@ from flamie.database.db import (
 )
 from flamie.utils.errors import GlobalErrorHandler
 from flamie.utils.cache import get_chat_member_cached
-from flamie.utils.permissions import require_permission, user_has_role
+from flamie.utils.permissions import require_permission
 from flamie.modules.settings import (
     chat_language, get_chat_setting, module_enabled_for_message,
     register_settings, set_chat_setting,
@@ -95,7 +95,9 @@ def usuario_puede_administrar(chat_id, chat_type, user_id):
     if chat_type == "private":
         return False
     try:
-        return get_chat_member_cached(bot, chat_id, user_id).status in ("administrator", "creator")
+        # Los permisos de administración pueden cambiar mientras el bot sigue activo.
+        # Consultar Telegram directamente evita rechazos por el TTL de la caché.
+        return bot.get_chat_member(chat_id, user_id).status in ("administrator", "creator")
     except Exception:
         return False
 
@@ -114,6 +116,7 @@ def registrar_comandos_menu():
         ("recordar", "Programa un recordatorio"), ("afk", "Marca tu estado como AFK"),
         ("encuesta", "Crea una encuesta"), ("idsticker", "Muestra el ID de un sticker"),
         ("getsticker", "Reenvía un sticker"),
+        ("anime", "Abre el panel de reacciones anime"),
         ("top", "Muestra el ranking y niveles del grupo"), ("quiz", "Inicia una pregunta de trivia"),
         ("ship", "Calcula compatibilidad entre dos usuarios"), ("verdadoreto", "Juega verdad o reto"),
     ]
@@ -185,6 +188,7 @@ def teclado_ayuda(message, user_id=None, panel="inicio"):
             telebot.types.InlineKeyboardButton(label("Informacion"), callback_data="help:info"),
             telebot.types.InlineKeyboardButton(label("Ocio"), callback_data="help:ocio"),
         )
+        markup.row(telebot.types.InlineKeyboardButton("Anime", callback_data="help:anime"))
         markup.row(
             telebot.types.InlineKeyboardButton(label("Stickers"), callback_data="help:stickers"),
             telebot.types.InlineKeyboardButton(label("Reglas"), callback_data="help:reglas"),
@@ -201,7 +205,7 @@ def teclado_ayuda(message, user_id=None, panel="inicio"):
                 markup.row(telebot.types.InlineKeyboardButton(label("Propietario"), callback_data="help:propietario"))
         markup.row(telebot.types.InlineKeyboardButton(label("Cerrar"), callback_data="help:cerrar"))
     else:
-        paneles = ["info", "ocio", "stickers", "reglas", "utilidades"]
+        paneles = ["info", "ocio", "anime", "stickers", "reglas", "utilidades"]
         if chat_type == "private":
             paneles.append("activacion")
         if es_admin:
@@ -216,6 +220,15 @@ def teclado_ayuda(message, user_id=None, panel="inicio"):
                 telebot.types.InlineKeyboardButton(label("Anterior"), callback_data=f"help:{anterior}"),
                 telebot.types.InlineKeyboardButton(label("Siguiente"), callback_data=f"help:{siguiente}"),
             )
+        if panel == "anime":
+            markup.row(*[
+                telebot.types.InlineKeyboardButton(f"/{action}", callback_data=f"anime:{action}")
+                for action in ("abrazar", "acariciar", "saludar", "besar", "aplaudir", "bailar")
+            ])
+            markup.row(*[
+                telebot.types.InlineKeyboardButton(f"/{action}", callback_data=f"anime:{action}")
+                for action in ("llorar", "reir", "guinar", "sonrojar", "golpear", "morder")
+            ])
         markup.row(
             telebot.types.InlineKeyboardButton(label("Volver a paneles"), callback_data="help:inicio"),
             telebot.types.InlineKeyboardButton(label("Cerrar"), callback_data="help:cerrar"),
@@ -228,7 +241,8 @@ def texto_panel_ayuda(panel, user_id, chat_id, chat_type):
     paneles = {
         "inicio": "Ayuda de Flamie\nElige un panel. Los paneles administrativos solo se muestran a administradores del grupo y al propietario.",
         "info": "Informacion\n/info, /id — Datos e identificadores del chat y usuario.\n/chatid — ID del chat.",
-        "ocio": "Ocio\n/8ball — Respuesta aleatoria. /dado — Lanza un dado.\n/quiz — Trivia. /ship — Compatibilidad.\n/verdadoreto — Elige verdad o reto. /top — Ranking y niveles.\nReacciones: /abrazar, /acariciar, /saludar, /besar, /aplaudir, /bailar, /llorar.",
+        "ocio": "Ocio\n/8ball — Respuesta aleatoria. /dado — Lanza un dado.\n/quiz — Trivia. /ship — Compatibilidad.\n/verdadoreto — Elige verdad o reto. /top — Ranking y niveles.\n/anime abre el panel de reacciones: abrazar, acariciar, saludar, besar, aplaudir, bailar y más.",
+        "anime": "Reacciones anime\nElige una acción en los botones para enviar una reacción al grupo. También puedes usar /anime.",
         "stickers": "Stickers\n/q — Responde a un texto para crear sticker de cita.\n/idsticker — Muestra los IDs de un sticker.\n/getsticker — Reenvía un sticker.",
         "reglas": "Reglas\n/rules — Consulta las reglas de este grupo.",
         "utilidades": "Utilidades\n/tr idioma texto — Traduce; /tts texto — Genera audio.\n/clima ciudad, /calc expresión, /wiki tema, /uinfo — Consultas y cálculo.\n/recordar 10m texto — Recordatorio persistente. /afk [motivo] — Estado AFK.\n/encuesta pregunta | opción 1 | opción 2 — Crea una encuesta.\n/chatlink — Obtiene el enlace del grupo. /staff — Lista administradores.\n/get nombre o #nombre — Consulta una nota guardada. /activar — Solicita una activacion en privado.",
@@ -240,7 +254,8 @@ def texto_panel_ayuda(panel, user_id, chat_id, chat_type):
     paneles_en = {
         "inicio": "Flamie help\nChoose a page. Group administration pages are available to group admins and the owner.",
         "info": "Information\n/info, /id — Chat and user details.\n/chatid — Chat identifier.",
-        "ocio": "Fun\n/8ball — Random answer. /dado — Roll a die.\n/quiz — Trivia. /ship — Compatibility.\n/verdadoreto — Pick truth or dare. /top — Ranking and levels.\nReactions: /abrazar, /acariciar, /saludar, /besar, /aplaudir, /bailar, /llorar.",
+        "ocio": "Fun\n/8ball — Random answer. /dado — Roll a die.\n/quiz — Trivia. /ship — Compatibility.\n/verdadoreto — Pick truth or dare. /top — Ranking and levels.\n/anime opens the reaction panel: hug, pet, wave, kiss, clap, dance, and more.",
+        "anime": "Anime reactions\nChoose an action below to send a reaction to the group. You can also use /anime.",
         "stickers": "Stickers\n/q — Reply to a text to create a quote sticker.\n/idsticker — Show sticker IDs.\n/getsticker — Resend a sticker.",
         "reglas": "Rules\n/rules — View this group's rules.",
         "utilidades": "Utilities\n/tr language text — Translate; /tts text — Generate audio.\n/clima city, /calc expression, /wiki topic, /uinfo — Queries and calculation.\n/recordar 10m text — Persistent reminder. /afk [reason] — AFK status.\n/encuesta question | option 1 | option 2 — Create a poll.\n/chatlink — Get the group link. /staff — List administrators.\n/get name or #name — Retrieve a saved note. /activar — Request activation in private chat.",
@@ -389,16 +404,16 @@ def query(sql, params=()):
 # ==========================================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    texto = (
-        "Bienvenido. Usa /help para abrir los paneles de funciones o /info "
-        "para consultar los datos de este chat."
-    )
+    user_id = message.from_user.id if message.from_user else 0
+    texto = "¡Hola! Soy <b>Flamie</b> 🐾\nElige una sección para ver lo que puedo hacer."
+    teclado = teclado_ayuda(message, user_id=user_id)
     enviado = enviar_animacion_cacheada(
-        message.chat.id, "FlamieBot.gif", caption=texto,
+        message.chat.id, "FlamieBot.gif", caption=texto, parse_mode="HTML",
+        reply_markup=teclado,
         reply_to_message_id=message.message_id,
     )
     if enviado is None:
-        bot.reply_to(message, texto)
+        bot.reply_to(message, texto, parse_mode="HTML", reply_markup=teclado)
 
 
 @bot.message_handler(commands=['help'])
@@ -504,9 +519,17 @@ def cmd_dado(message):
 
 def exigir_admin(message):
     try:
-        return message.chat.type != "private" and user_has_role(
-            bot, MI_ID, message.chat.id, message.chat.type, message.from_user.id, "admin"
-        )
+        if message.chat.type == "private":
+            return False
+        # Telegram permite publicar como el propio grupo (administrador anónimo).
+        sender_chat = getattr(message, "sender_chat", None)
+        if sender_chat and sender_chat.id == message.chat.id:
+            return True
+        if not message.from_user:
+            return False
+        if message.from_user.id == MI_ID:
+            return True
+        return bot.get_chat_member(message.chat.id, message.from_user.id).status in ("administrator", "creator")
     except Exception:
         return False
 

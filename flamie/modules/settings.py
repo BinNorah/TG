@@ -75,10 +75,18 @@ def _is_admin(bot, owner_id, chat_id, chat_type, user_id):
     if chat_type == "private":
         return False
     try:
-        return get_chat_member_cached(bot, chat_id, user_id).status in ("administrator", "creator")
+        return bot.get_chat_member(chat_id, user_id).status in ("administrator", "creator")
     except Exception:
         logger.exception("No se pudo comprobar la administración del usuario")
         return False
+
+
+def _message_is_admin(bot, owner_id, message):
+    sender_chat = getattr(message, "sender_chat", None)
+    if sender_chat and sender_chat.id == message.chat.id:
+        return True  # comando enviado como el grupo por un administrador anónimo
+    user = getattr(message, "from_user", None)
+    return bool(user and _is_admin(bot, owner_id, message.chat.id, message.chat.type, user.id))
 
 
 def _keyboard(chat_id):
@@ -130,7 +138,7 @@ def register_settings(bot, owner_id):
             if message.chat.type == "private":
                 bot.reply_to(message, "Usa /settings dentro del grupo para configurar Flamie.")
                 return
-            if not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
+            if not _message_is_admin(bot, owner_id, message):
                 bot.reply_to(message, "Solo los administradores del grupo pueden cambiar estos ajustes.")
                 return
 

@@ -161,7 +161,8 @@ def register_utilities(bot, owner_id):
             if not module_enabled_for_message(message, "utilities"):
                 return
             argument = _arguments(message)
-            target = "en"
+            # Si no se indica destino, traducir al idioma configurado para este chat.
+            target = chat_language(message.chat.id)
             parts = argument.split(maxsplit=1)
             if parts and re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", parts[0]):
                 target = parts[0]
@@ -186,7 +187,7 @@ def register_utilities(bot, owner_id):
             bot.reply_to(message, html.escape(translated[:4000]), parse_mode="HTML")
         except Exception:
             logger.exception("Falló /tr")
-            bot.reply_to(message, "No pude traducirlo. Revisa LIBRETRANSLATE_URL y, si hace falta, LIBRETRANSLATE_API_KEY.")
+            bot.reply_to(message, "No pude traducirlo ahora. Comprueba que LIBRETRANSLATE_URL apunte a una instancia disponible y configura LIBRETRANSLATE_API_KEY si esa instancia lo requiere.")
 
     @bot.message_handler(commands=["tts"])
     def cmd_tts(message):

@@ -135,6 +135,56 @@ def register_fun(bot):
             logger.exception("Falló /verdadoreto")
             bot.reply_to(message, "No pude elegir una opción ahora.")
 
+    @bot.message_handler(commands=["anime"])
+    def cmd_anime(message):
+        try:
+            if not module_enabled_for_message(message, "fun"):
+                return
+            keyboard = telebot.types.InlineKeyboardMarkup(row_width=3)
+            buttons = [
+                telebot.types.InlineKeyboardButton(
+                    f"/{name}", callback_data=f"anime:{name}"
+                )
+                for name in ANIME_ACTIONS
+            ]
+            keyboard.add(*buttons)
+            bot.reply_to(
+                message,
+                "✨ <b>Reacciones anime</b>\nElige una reacción. También puedes usar los comandos directamente.",
+                parse_mode="HTML", reply_markup=keyboard,
+            )
+        except Exception:
+            logger.exception("Falló /anime")
+            bot.reply_to(message, "No pude abrir las reacciones ahora.")
+
+    @bot.callback_query_handler(func=lambda call: bool(call.data and call.data.startswith("anime:")))
+    def callback_anime(call):
+        try:
+            if call.message.chat.type != "private" and not module_enabled_for_message(call.message, "fun"):
+                bot.answer_callback_query(call.id, "Las funciones de diversión están desactivadas en este grupo.")
+                return
+            command = call.data.split(":", 1)[1]
+            if command not in ANIME_ACTIONS:
+                bot.answer_callback_query(call.id, "Reacción no disponible.", show_alert=True)
+                return
+            response = requests.get(
+                f"https://nekos.best/api/v2/{ANIME_ACTIONS[command]}",
+                headers={"User-Agent": f"FlamieTelegramBot ({BOT_PUBLIC_LINK})"}, timeout=(3, 10),
+            )
+            response.raise_for_status()
+            results = response.json().get("results") or []
+            url = results[0].get("url") if results else None
+            if not url or not url.startswith("https://nekos.best/"):
+                raise ValueError("URL de reacción no válida")
+            bot.answer_callback_query(call.id)
+            bot.send_animation(call.message.chat.id, url, caption=f"✨ {html.escape(command)}")
+        except Exception:
+            logger.exception("Falló callback de reacción anime")
+            try:
+                bot.answer_callback_query(call.id, "No pude cargar esa reacción ahora.")
+            except Exception:
+                logger.exception("No se pudo responder callback anime")
+
     @bot.message_handler(func=lambda m: bool(m.text and re.match(r"^/(?:" + "|".join(ANIME_ACTIONS) + r")(?:@[A-Za-z0-9_]+)?(?:\s|$)", m.text, re.IGNORECASE)))
     def cmd_anime_reaction(message):
         try:
