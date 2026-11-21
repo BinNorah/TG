@@ -29,6 +29,12 @@ class TTLCache:
         with self._lock:
             self._values.pop(key, None)
 
+    def invalidate_where(self, predicate):
+        """Elimina las entradas cuya clave cumple el predicado."""
+        with self._lock:
+            for key in [k for k in self._values if predicate(k)]:
+                self._values.pop(key, None)
+
 
 chat_member_cache = TTLCache(ttl_seconds=30)
 bot_identity_cache = TTLCache(ttl_seconds=3600, max_items=1)
@@ -38,6 +44,11 @@ def get_chat_member_cached(bot, chat_id, user_id):
     return chat_member_cache.get_or_load(
         (chat_id, user_id), lambda: bot.get_chat_member(chat_id, user_id)
     )
+
+
+def invalidate_chat_members(chat_id):
+    """Olvida los roles cacheados de un chat (tras promover, degradar, banear...)."""
+    chat_member_cache.invalidate_where(lambda key: key[0] == chat_id)
 
 
 def get_bot_id_cached(bot):

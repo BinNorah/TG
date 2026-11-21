@@ -206,6 +206,20 @@ class GroupAutomationMiddleware(BaseMiddleware):
                 self._notice(message, f"Ese usuario está AFK.{reason}", f"afk_{target_id}")
                 break
 
+    @staticmethod
+    def _users_to_remember(message):
+        """Usuarios visibles en el mensaje: autor, autor del mensaje respondido y nuevos miembros."""
+        candidates = [getattr(message, "from_user", None)]
+        replied = getattr(message, "reply_to_message", None)
+        if replied is not None:
+            candidates.append(getattr(replied, "from_user", None))
+        candidates.extend(getattr(message, "new_chat_members", None) or [])
+        seen = {}
+        for user in candidates:
+            if user is not None and not user.is_bot:
+                seen[user.id] = user
+        return list(seen.values())
+
     def _record_activity(self, message):
         if not message.from_user or message.from_user.is_bot:
             return
@@ -242,6 +256,8 @@ class GroupAutomationMiddleware(BaseMiddleware):
                 return CancelUpdate()
             if chat.type not in ("group", "supergroup"):
                 return
+            if getattr(message, "is_automatic_forward", False):
+                return  # publicaciones del canal vinculado: no se les aplican reglas
             con = get_db()
             try:
                 con.execute(
@@ -249,6 +265,18 @@ class GroupAutomationMiddleware(BaseMiddleware):
                     "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title,chat_type=excluded.chat_type,last_seen=CURRENT_TIMESTAMP",
                     (chat.id, chat.title or "", chat.type),
                 )
+                known = [
+                    (chat.id, member.id, member.username, member.first_name or "")
+                    for member in self._users_to_remember(message)
+                ]
+                if known:
+                    con.executemany(
+                        "INSERT INTO chat_users(chat_id,user_id,username,first_name,updated_at) "
+                        "VALUES(?,?,?,?,CURRENT_TIMESTAMP) "
+                        "ON CONFLICT(chat_id,user_id) DO UPDATE SET username=excluded.username,"
+                        "first_name=excluded.first_name,updated_at=CURRENT_TIMESTAMP",
+                        known,
+                    )
                 new_members = getattr(message, "new_chat_members", None) or []
                 globally_banned = []
                 if new_members:

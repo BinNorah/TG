@@ -6,3 +6,10 @@ __pycache__/
 *.session
 *.session-journal
 mensajes_flamie.db
+mensajes_flamie.db-wal
+mensajes_flamie.db-shm
+*.db
+.env.*
+!.env.example
+.venv/
+venv/

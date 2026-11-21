@@ -3,29 +3,48 @@ import html
 import logging
 import re
 
-import telebot
-
 from flamie.database.db import get_db
 from flamie.modules.antispam import BLOCKABLE_TYPES
-from flamie.modules.settings import _is_admin, module_enabled_for_message, set_chat_setting
+from flamie.modules.settings import (
+    _message_is_admin, ensure_module_for_admin, module_enabled_for_message, set_chat_setting,
+)
 
 logger = logging.getLogger(__name__)
 
 
+def _split_key_value(argument):
+    """Acepta «clave | valor» (formato original) y también «clave valor».
+
+    Devuelve (clave, valor); ambos vacíos si no hay datos suficientes.
+    """
+    argument = argument.strip()
+    if "|" in argument:
+        key, _, value = argument.partition("|")
+    else:
+        key, _, value = argument.partition(" ")
+    return key.strip(), value.strip()
+
+
 def register_filters(bot, owner_id):
+    def admin_config(message, denial, module):
+        """Comprueba chat de grupo + admin + activa el módulo. True si se puede seguir."""
+        if message.chat.type == "private":
+            bot.reply_to(message, "Este comando solo funciona dentro de un grupo.")
+            return False
+        if not _message_is_admin(bot, owner_id, message):
+            bot.reply_to(message, denial)
+            return False
+        return ensure_module_for_admin(bot, message, module)
+
     @bot.message_handler(commands=["filter"])
     def cmd_filter(message):
         try:
-            if message.chat.type == "private" or not module_enabled_for_message(message, "filters"):
-                return
-            if not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
-                bot.reply_to(message, "Solo los administradores pueden crear filtros.")
+            if not admin_config(message, "Solo los administradores pueden crear filtros.", "filters"):
                 return
             argument = (message.text or "").partition(" ")[2]
-            trigger, separator, response = argument.partition("|")
-            trigger, response = trigger.strip(), response.strip()
-            if not separator or not trigger or not response or len(trigger) > 80 or len(response) > 3000:
-                bot.reply_to(message, "Uso: /filter palabra | respuesta (máximo 80 y 3000 caracteres).")
+            trigger, response = _split_key_value(argument)
+            if not trigger or not response or len(trigger) > 80 or len(response) > 3000:
+                bot.reply_to(message, "Uso: /filter palabra | respuesta (también vale /filter palabra respuesta). Máximo 80 y 3000 caracteres.")
                 return
             con = get_db()
             try:
@@ -45,10 +64,7 @@ def register_filters(bot, owner_id):
     @bot.message_handler(commands=["unfilter"])
     def cmd_unfilter(message):
         try:
-            if message.chat.type == "private" or not module_enabled_for_message(message, "filters"):
-                return
-            if not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
-                bot.reply_to(message, "Solo los administradores pueden eliminar filtros.")
+            if not admin_config(message, "Solo los administradores pueden eliminar filtros.", "filters"):
                 return
             trigger = (message.text or "").partition(" ")[2].strip()
             if not trigger:
@@ -69,16 +85,13 @@ def register_filters(bot, owner_id):
     @bot.message_handler(commands=["save"])
     def cmd_save(message):
         try:
-            if message.chat.type == "private" or not module_enabled_for_message(message, "filters"):
-                return
-            if not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
-                bot.reply_to(message, "Solo los administradores pueden guardar notas.")
+            if not admin_config(message, "Solo los administradores pueden guardar notas.", "filters"):
                 return
             argument = (message.text or "").partition(" ")[2]
-            name, separator, content = argument.partition("|")
-            name, content = name.strip().lstrip("#").lower(), content.strip()
-            if not separator or not re.fullmatch(r"[a-z0-9_]{1,40}", name) or not content or len(content) > 3500:
-                bot.reply_to(message, "Uso: /save nombre | contenido (nombre de hasta 40 letras, números o _).")
+            name, content = _split_key_value(argument)
+            name = name.lstrip("#").lower()
+            if not re.fullmatch(r"[a-z0-9_]{1,40}", name) or not content or len(content) > 3500:
+                bot.reply_to(message, "Uso: /save nombre | contenido (también vale /save nombre contenido). El nombre admite hasta 40 letras, números o _.")
                 return
             con = get_db()
             try:
@@ -98,7 +111,10 @@ def register_filters(bot, owner_id):
     @bot.message_handler(commands=["get"])
     def cmd_get(message):
         try:
-            if message.chat.type == "private" or not module_enabled_for_message(message, "filters"):
+            if message.chat.type == "private":
+                bot.reply_to(message, "Las notas se guardan por grupo. Usa /get dentro del grupo.")
+                return
+            if not module_enabled_for_message(message, "filters"):
                 return
             name = (message.text or "").partition(" ")[2].strip().lstrip("#").lower()
             if not name:
@@ -123,10 +139,7 @@ def register_filters(bot, owner_id):
     @bot.message_handler(commands=["antilinks"])
     def cmd_antilinks(message):
         try:
-            if message.chat.type == "private" or not module_enabled_for_message(message, "antispam"):
-                return
-            if not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
-                bot.reply_to(message, "Solo los administradores pueden cambiar esta regla.")
+            if not admin_config(message, "Solo los administradores pueden cambiar esta regla.", "antispam"):
                 return
             value = (message.text or "").partition(" ")[2].strip().lower()
             if value not in {"on", "off", "estado"}:
@@ -145,10 +158,7 @@ def register_filters(bot, owner_id):
     @bot.message_handler(commands=["floodconfig"])
     def cmd_floodconfig(message):
         try:
-            if message.chat.type == "private" or not module_enabled_for_message(message, "antispam"):
-                return
-            if not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
-                bot.reply_to(message, "Solo los administradores pueden configurar el antiflood.")
+            if not admin_config(message, "Solo los administradores pueden configurar el antiflood.", "antispam"):
                 return
             parts = (message.text or "").split()
             if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
@@ -168,10 +178,7 @@ def register_filters(bot, owner_id):
     @bot.message_handler(commands=["blockword"])
     def cmd_blockword(message):
         try:
-            if message.chat.type == "private" or not module_enabled_for_message(message, "antispam"):
-                return
-            if not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
-                bot.reply_to(message, "Solo los administradores pueden editar la lista negra.")
+            if not admin_config(message, "Solo los administradores pueden editar la lista negra.", "antispam"):
                 return
             parts = (message.text or "").split(maxsplit=2)
             if len(parts) == 1 or (len(parts) > 1 and parts[1].lower() == "list"):
@@ -208,10 +215,7 @@ def register_filters(bot, owner_id):
     @bot.message_handler(commands=["blockcontent"])
     def cmd_blockcontent(message):
         try:
-            if message.chat.type == "private" or not module_enabled_for_message(message, "antispam"):
-                return
-            if not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
-                bot.reply_to(message, "Solo los administradores pueden cambiar los bloqueos de contenido.")
+            if not admin_config(message, "Solo los administradores pueden cambiar los bloqueos de contenido.", "antispam"):
                 return
             parts = (message.text or "").split()
             if len(parts) != 3 or parts[1].lower() not in BLOCKABLE_TYPES or parts[2].lower() not in {"on", "off"}:

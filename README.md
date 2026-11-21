@@ -52,9 +52,9 @@ En local, `flamie/core/config.py` carga `.env` si existe; sin `DATA_DIR`, usa la
 - Antispam y comunidad: `/antilinks`, `/floodconfig`, `/blockword`, `/blockcontent`, `/filter`, `/unfilter`, `/save`, `/get`, `#nombre`, `/setrules`, `/clearrules`
 - Comandos personalizados del propietario: `/addcmd nombre | respuesta`, `/delcmd nombre`, `/listcmd`
 
-Los comandos de moderación que ya existían también aceptan los prefijos `.` y `,`. Para guardar o quitar una nota se usa `/save nombre | texto` o `/get nombre` y `#nombre`.
+Los comandos de moderación que ya existían también aceptan los prefijos `.` y `,`. Para guardar una nota se usa `/save nombre | texto` (o `/save nombre texto`); `/filter palabra | respuesta` también admite la forma sin barra vertical. Se consultan con `/get nombre` o `#nombre`.
 
-Los módulos de grupo se configuran por chat en `/settings`. Las funciones que modifican el grupo requieren que el bot tenga los permisos correspondientes.
+Los módulos de grupo se configuran por chat en `/settings`. Los módulos de bienvenida, captcha, antispam, filtros, solicitudes de ingreso y antiraid empiezan **desactivados**: al ejecutar un administrador cualquiera de sus comandos de configuración (`/setwelcome`, `/filter`, `/antilinks`...) el bot activa el módulo y lo avisa. Si un usuario usa un comando de un módulo apagado, el bot lo indica (una vez por minuto) en lugar de ignorarlo. Las funciones que modifican el grupo requieren que el bot tenga los permisos correspondientes.
 
 ### Propietario (chat privado)
 
@@ -62,6 +62,7 @@ Los módulos de grupo se configuran por chat en `/settings`. Las funciones que m
 - `/broadcast mensaje`
 - `/gban ID [motivo]`, `/ungban ID`
 - `/backup`
+- `/r ID mensaje` responde a un usuario por su ID (el comando que sugieren los avisos del userbot)
 - `/maintenance on|off|estado`
 - `/limpiar` para borrar el historial privado del bot tras confirmar
 
@@ -70,3 +71,17 @@ Los módulos de grupo se configuran por chat en `/settings`. Las funciones que m
 SQLite usa WAL y guarda las migraciones en `schema_version`. Mantén `DATA_DIR` en un volumen persistente para preservar configuraciones, estados, recordatorios, niveles, bloqueos globales y datos del userbot tras reinicios o despliegues.
 
 Los comandos `/tr`, `/tts`, `/clima`, `/wiki` y las reacciones anime consultan servicios externos. No incluyas tokens, credenciales de Pyrogram ni cadenas de sesión en mensajes, capturas o el repositorio.
+
+## Pruebas
+
+`tests/` contiene un simulador de la API de Telegram y pruebas de regresión que no necesitan token ni red:
+
+```bash
+python -m unittest tests.test_bot -v
+```
+
+Ejecútalas tras cualquier cambio (también si lo hace un asistente de IA): cubren comandos, paneles, moderación, captcha, solicitudes de ingreso, antispam y los flujos privados.
+
+## Seguridad: qué nunca debe estar en Git
+
+`.gitignore` excluye `.env`, `*.session`, `data/` y `mensajes_flamie.db`. Si alguno de esos archivos se llegó a subir antes de añadirlo al `.gitignore`, sigue en el historial: revoca la sesión de Telegram (Ajustes → Dispositivos), regenera la cadena de sesión y limpia el historial del repositorio.

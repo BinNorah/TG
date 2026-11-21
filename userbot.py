@@ -25,7 +25,10 @@ import json
 import logging
 
 from flamie.core.config import BASE_DIR, DATA_DIR, BOT_PUBLIC_USERNAME, BOT_PUBLIC_LINK, OWNER_DISPLAY_NAME, OWNER_ALIAS
-from flamie.database.db import init_db, load_userbot_respondidos, mark_userbot_respondido
+from flamie.database.db import (
+    init_db, load_userbot_chats_iniciados, load_userbot_respondidos,
+    mark_userbot_chat_iniciado, mark_userbot_respondido,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -245,7 +248,7 @@ async def notificar_con_foto(client, message: Message, user_id, nombre, contenid
             logger.exception("Falló el reenvío de media")
 
 # Chats donde el dueño de la cuenta escribio primero (no responder automaticamente)
-chats_iniciados_por_mi = set()
+chats_iniciados_por_mi = load_userbot_chats_iniciados()
 
 # ==========================================
 # 3. INTERCEPTAR MENSAJES ENVIADOS POR MI (para saber que YO inicie el chat)
@@ -255,6 +258,10 @@ async def registrar_mis_mensajes(client, message: Message):
     """Registra cuando el dueno envia un mensaje — ese chat no recibe respuesta automatica."""
     if message.chat.id not in chats_iniciados_por_mi:
         chats_iniciados_por_mi.add(message.chat.id)
+        try:
+            await asyncio.to_thread(mark_userbot_chat_iniciado, message.chat.id)
+        except Exception:
+            logger.exception("No se pudo guardar el chat iniciado por el propietario")
 
 
 @app.on_message(filters.private & filters.incoming & filters.user(BOT_ID))
@@ -365,7 +372,7 @@ async def interceptar(client, message: Message):
                     logger.exception("No se pudo enviar el texto alternativo")
 
             usuarios_respondidos.add(user_id)
-            mark_userbot_respondido(user_id)
+            await asyncio.to_thread(mark_userbot_respondido, user_id)
             logger.info("Respuesta automática enviada a user_id=%s", user_id)
         else:
             if yo_inicie:

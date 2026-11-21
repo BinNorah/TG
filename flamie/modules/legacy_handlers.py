@@ -16,8 +16,10 @@ from flamie.database.db import (
     load_usuarios_notificados, query, save_activation_state,
 )
 from flamie.utils.errors import GlobalErrorHandler
-from flamie.utils.cache import get_chat_member_cached
-from flamie.utils.permissions import require_permission
+from flamie.utils.cache import get_chat_member_cached, invalidate_chat_members
+from flamie.utils.permissions import (
+    default_unrestrict_permissions, no_permissions, require_permission,
+)
 from flamie.modules.settings import (
     chat_language, get_chat_setting, module_enabled_for_message,
     register_settings, set_chat_setting,
@@ -85,7 +87,7 @@ def enviar_animacion_cacheada(chat_id, nombre_archivo, caption=None, parse_mode=
 def comandos_personalizados_menu():
     # Reserva margen dentro del límite de 100 comandos que permite Telegram
     # para mostrar también los comandos administrativos y del propietario.
-    filas = query("SELECT command FROM custom_commands ORDER BY command LIMIT 20")
+    filas = query("SELECT command FROM custom_commands ORDER BY command LIMIT 100")
     return [telebot.types.BotCommand(str(fila[0]), "Comando personalizado") for fila in filas]
 
 
@@ -153,8 +155,11 @@ def registrar_comandos_menu():
         ("gban", "Bloquea un usuario en todos los grupos"), ("ungban", "Retira un bloqueo global"),
         ("backup", "Envía una copia de la base de datos"), ("maintenance", "Activa o consulta mantenimiento"),
         ("grupos", "Lista los grupos registrados"), ("logs", "Consulta acciones recientes"),
+        ("r", "Responde a un usuario por su ID"),
     ]
-    personalizados = comandos_personalizados_menu()
+    # Telegram admite como máximo 100 comandos por ámbito; el del propietario es el mayor.
+    espacio_personalizados = max(0, 100 - (len(privados) + len(administradores) + len(propietario)))
+    personalizados = comandos_personalizados_menu()[:espacio_personalizados]
     convertir = lambda pares: [telebot.types.BotCommand(nombre, descripcion) for nombre, descripcion in pares]
     comandos_publicos = convertir(publicos + [("get", "Consulta una nota guardada")]) + personalizados
     comandos_privados = convertir(privados) + personalizados
@@ -311,36 +316,9 @@ def callback_ayuda(call):
     except Exception:
         bot.answer_callback_query(call.id, "No se pudo abrir este panel.")
 
-def registrar_usuarios_vistos(updates):
-    """Guarda usuarios observados para poder resolver nombres de usuario."""
-    rows = []
-    for update in updates:
-        message = getattr(update, "message", None)
-        if not message or message.chat.type == "private" or not message.from_user:
-            continue
-        user = message.from_user
-        rows.append((message.chat.id, user.id, user.username, user.first_name or ""))
-    if not rows:
-        return
-    try:
-        con = get_db()
-        try:
-            con.executemany(
-                """INSERT INTO chat_users (chat_id, user_id, username, first_name, updated_at)
-                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(chat_id, user_id) DO UPDATE SET
-                     username=excluded.username, first_name=excluded.first_name,
-                     updated_at=CURRENT_TIMESTAMP""",
-                rows,
-            )
-            con.commit()
-        finally:
-            con.close()
-    except Exception as exc:
-        logger.exception("No se pudieron registrar los usuarios del chat")
-
-
-bot.set_update_listener(registrar_usuarios_vistos)
+# Los usuarios de cada grupo (necesarios para resolver @usuario en /ban, /mute, /uinfo...)
+# se registran en GroupAutomationMiddleware.pre_process. El antiguo update listener
+# recibía objetos Message en lugar de Update y nunca guardaba nada.
 
 # ==========================================
 # ==========================================
@@ -392,13 +370,6 @@ def _marcar_notificado_db(user_id):
     finally:
         con.close()
 
-def query(sql, params=()):
-    con = get_db()
-    try:
-        cur = con.execute(sql, params)
-        return cur.fetchall()
-    finally:
-        con.close()
 
 # ==========================================
 # 6. COMANDOS — ADMIN
@@ -732,6 +703,11 @@ def enviar_respuesta(message, uid, tipo):
         bot.send_message(MI_ID, "Respuesta cancelada.")
         return
     try:
+        if message.content_type != "text":
+            # Foto, captura, documento, nota de voz...: se copia tal cual al usuario.
+            bot.copy_message(int(uid), message.chat.id, message.message_id)
+            bot.send_message(MI_ID, f"✅ Enviado a <code>{uid}</code>.", parse_mode='HTML')
+            return
         if tipo == "act":
             texto = (
                 f"⬩➤{OWNER_DISPLAY_NAME}ᓚᘏᗢ\n"
@@ -752,7 +728,9 @@ def enviar_respuesta(message, uid, tipo):
 # ==========================================
 @bot.message_handler(content_types=['photo'])
 def recibir_foto(message):
-    if message.chat.id == MI_ID:
+    # Solo recepción privada: en grupos las fotos son conversación normal (y pasan
+    # por el antispam), no solicitudes dirigidas al propietario.
+    if message.chat.type != "private" or message.chat.id == MI_ID:
         return
     uid    = message.from_user.id
     nombre = nombre_usuario(message.from_user)
@@ -770,7 +748,7 @@ def recibir_foto(message):
 
 @bot.message_handler(content_types=['document'])
 def recibir_documento(message):
-    if message.chat.id == MI_ID:
+    if message.chat.type != "private" or message.chat.id == MI_ID:
         return
     uid    = message.from_user.id
     nombre = nombre_usuario(message.from_user)
@@ -785,6 +763,55 @@ def recibir_documento(message):
         reply_markup=teclado_responder(uid)
     )
     bot.reply_to(message, "✦ Archivo recibido. Sera revisado.")
+
+
+@bot.message_handler(content_types=['voice', 'video', 'audio', 'sticker', 'video_note', 'animation', 'contact', 'location'])
+def recibir_otro_multimedia(message):
+    """Reenvía al propietario cualquier otro contenido enviado al bot en privado.
+
+    Antes la voz, los vídeos, los stickers o los audios se ignoraban sin avisar.
+    """
+    if message.chat.type != "private" or message.chat.id == MI_ID or not message.from_user:
+        return
+    uid = message.from_user.id
+    nombre = nombre_usuario(message.from_user)
+    etiquetas = {
+        "voice": "🎙️ Nota de voz", "video": "🎥 Video", "audio": "🎵 Audio",
+        "sticker": "🎭 Sticker", "video_note": "⭕ Video circular", "animation": "🖼️ GIF",
+        "contact": "👤 Contacto", "location": "📍 Ubicación",
+    }
+    etiqueta = etiquetas.get(message.content_type, "📨 Mensaje")
+    hora = datetime.now().strftime("%H:%M")
+    bot.forward_message(MI_ID, message.chat.id, message.message_id)
+    bot.send_message(
+        MI_ID,
+        f"{etiqueta} <b>recibido</b> [{hora}]\n"
+        f"<a href='tg://user?id={uid}'>{html.escape(nombre)}</a>\n"
+        f"ID: <code>{uid}</code>",
+        parse_mode='HTML',
+        reply_markup=teclado_responder(uid),
+    )
+    if not ya_fue_notificado(message.chat.id):
+        bot.reply_to(message, "✦ Mensaje recibido. Sera revisado.")
+        marcar_notificado(message.chat.id)
+
+
+@bot.message_handler(commands=['r'])
+def cmd_responder_por_id(message):
+    """Atajo del propietario: /r ID texto (es el comando que muestran los avisos del userbot)."""
+    if not message.from_user or message.from_user.id != MI_ID or message.chat.type != "private":
+        return
+    partes = (message.text or "").split(maxsplit=2)
+    if len(partes) < 3 or not partes[1].isdecimal():
+        bot.reply_to(message, "Uso: /r ID mensaje")
+        return
+    uid = int(partes[1])
+    try:
+        bot.send_message(uid, f"⬩➤{OWNER_DISPLAY_NAME}ᓚᘏᗢ\n{partes[2]}", disable_web_page_preview=True)
+        bot.reply_to(message, f"✅ Enviado a <code>{uid}</code>.", parse_mode="HTML")
+    except Exception:
+        logger.exception("No se pudo enviar la respuesta con /r")
+        bot.reply_to(message, f"No se pudo enviar el mensaje a <code>{uid}</code>. ¿Ya inició una conversación con el bot?", parse_mode="HTML")
 
 
 # ==========================================
@@ -899,16 +926,19 @@ def _aplicar_accion_umbral(chat_id, target_id, action):
         bot.ban_chat_member(chat_id, target_id)
         bot.unban_chat_member(chat_id, target_id)
     elif action == "mute":
-        permisos = telebot.types.ChatPermissions(
-            can_send_messages=False, can_send_media_messages=False, can_send_audios=False,
-            can_send_documents=False, can_send_photos=False, can_send_videos=False,
-            can_send_video_notes=False, can_send_voice_notes=False, can_send_polls=False,
-            can_send_other_messages=False, can_add_web_page_previews=False,
-        )
-        bot.restrict_chat_member(chat_id, target_id, permissions=permisos)
+        bot.restrict_chat_member(chat_id, target_id, permissions=no_permissions())
 
 
 def procesar_comando_moderacion(message):
+    try:
+        _procesar_comando_moderacion(message)
+    finally:
+        # Un /promote, /demote o /ban cambia el rol del objetivo; sin esto la caché de
+        # 30 s hacía que el siguiente comando viera el estado anterior.
+        invalidate_chat_members(message.chat.id)
+
+
+def _procesar_comando_moderacion(message):
     coincidencia = MODERATION_RE.match(message.text or "")
     if not coincidencia:
         return
@@ -1015,13 +1045,9 @@ def procesar_comando_moderacion(message):
                 bot.unban_chat_member(message.chat.id, objetivo)
                 respuesta = f"Usuario <code>{objetivo}</code> expulsado. Motivo: {html.escape(motivo[:500])}."
             else:
-                permisos = telebot.types.ChatPermissions(
-                    can_send_messages=False, can_send_media_messages=False, can_send_audios=False,
-                    can_send_documents=False, can_send_photos=False, can_send_videos=False,
-                    can_send_video_notes=False, can_send_voice_notes=False, can_send_polls=False,
-                    can_send_other_messages=False, can_add_web_page_previews=False,
+                bot.restrict_chat_member(
+                    message.chat.id, objetivo, until_date=hasta, permissions=no_permissions(),
                 )
-                bot.restrict_chat_member(message.chat.id, objetivo, until_date=hasta, permissions=permisos)
                 respuesta = f"Usuario <code>{objetivo}</code> silenciado/restringido. Motivo: {html.escape(motivo[:500])}."
             _registrar_accion_mod(message.chat.id, _actor_id(message), objetivo, comando, motivo, duracion)
             bot.reply_to(message, respuesta, parse_mode="HTML")
@@ -1035,13 +1061,10 @@ def procesar_comando_moderacion(message):
             return
 
         if comando == "unmute":
-            permisos = telebot.types.ChatPermissions(
-                can_send_messages=True, can_send_media_messages=True, can_send_audios=True,
-                can_send_documents=True, can_send_photos=True, can_send_videos=True,
-                can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True,
-                can_send_other_messages=True, can_add_web_page_previews=True,
+            bot.restrict_chat_member(
+                message.chat.id, objetivo,
+                permissions=default_unrestrict_permissions(bot, message.chat.id),
             )
-            bot.restrict_chat_member(message.chat.id, objetivo, permissions=permisos)
             _registrar_accion_mod(message.chat.id, _actor_id(message), objetivo, "unmute", resto or "")
             bot.reply_to(message, f"Se retiró el silencio de <code>{objetivo}</code>.", parse_mode="HTML")
             return
@@ -1342,7 +1365,7 @@ COMANDOS_RESERVADOS = {
     "tr", "tts", "clima", "calc", "wiki", "recordar", "afk", "encuesta",
     "quiz", "ship", "verdadoreto", "abrazar", "acariciar", "saludar", "besar", "aplaudir", "bailar", "llorar", "reir", "guinar", "sonrojar", "golpear", "morder", "8ball", "dado", "top", "ban", "tban", "mute", "tmute", "unmute",
     "restrict", "kick", "promote", "demote", "warn", "unwarn", "unban", "warns",
-    "resetwarns", "warnconfig", "purge", "report", "stats", "broadcast", "gban", "ungban", "backup", "maintenance", "grupos", "logs", "admin", "settitle", "setgtitle",
+    "resetwarns", "warnconfig", "purge", "report", "settings", "anime", "r", "stats", "broadcast", "gban", "ungban", "backup", "maintenance", "grupos", "logs", "admin", "settitle", "setgtitle",
     "setdescr", "setwelcome", "setgoodbye", "captchaconfig", "antiraid", "filter", "unfilter",
     "save", "get", "antilinks", "floodconfig", "blockword", "blockcontent",
     "del", "pin", "unpin", "unallpin", "admin", "msg", "copy", "forward",

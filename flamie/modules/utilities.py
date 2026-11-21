@@ -20,6 +20,16 @@ _reminder_lock = threading.Lock()
 _reminder_started = False
 _stop_reminders = threading.Event()
 
+# Códigos de idioma aceptados como destino en /tr. Se valida contra esta lista porque
+# palabras cortas en español («yo», «la», «me») también encajan con el patrón [a-z]{2,3}.
+LANGUAGE_CODES = {
+    "af", "sq", "ar", "hy", "az", "eu", "be", "bn", "bs", "bg", "ca", "zh", "hr", "cs", "da",
+    "nl", "en", "eo", "et", "fi", "fr", "gl", "ka", "de", "el", "gu", "ht", "he", "hi", "hu",
+    "is", "id", "ga", "it", "ja", "kn", "kk", "ko", "ku", "la", "lv", "lt", "mk", "ms", "mt",
+    "mr", "mn", "ne", "no", "fa", "pl", "pt", "pa", "ro", "ru", "sr", "sk", "sl", "es", "sw",
+    "sv", "tl", "ta", "te", "th", "tr", "uk", "ur", "uz", "vi", "cy", "yi", "zu",
+}
+
 HTTP_HEADERS = {"User-Agent": "FlamieBot/1.0 (Telegram utility commands)"}
 WMO_CODES = {
     0: "Despejado", 1: "Mayormente despejado", 2: "Parcialmente nublado", 3: "Nublado",
@@ -189,7 +199,7 @@ def register_utilities(bot, owner_id):
             # Si no se indica destino, traducir al idioma configurado para este chat.
             target = chat_language(message.chat.id)
             parts = argument.split(maxsplit=1)
-            if parts and re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", parts[0]):
+            if parts and re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", parts[0]) and parts[0].split("-")[0] in LANGUAGE_CODES:
                 target = parts[0]
                 text = parts[1] if len(parts) > 1 else _reply_text(message)
             else:
@@ -229,6 +239,14 @@ def register_utilities(bot, owner_id):
                 return
             from gtts import gTTS
             lang = "es" if chat_language(message.chat.id) == "es" else "en"
+            try:
+                from langdetect import DetectorFactory, detect
+                DetectorFactory.seed = 0
+                detected = detect(text).split("-", 1)[0]
+                if detected in LANGUAGE_CODES:
+                    lang = detected
+            except Exception:
+                logger.debug("No se pudo detectar el idioma del texto para /tts", exc_info=True)
             audio = BytesIO()
             gTTS(text=text, lang=lang, timeout=(3, 12)).write_to_fp(audio)
             audio.seek(0)
@@ -331,7 +349,6 @@ def register_utilities(bot, owner_id):
             full_name = " ".join(x for x in [user.first_name, user.last_name] if x) or "Usuario"
             nickname = get_chat_setting(message.chat.id, f"user_tag:{target_id}")
             username = f"@{user.username}" if user.username else "Sin username"
-            bio = ""
             try:
                 chat_member = bot.get_chat_member(message.chat.id, target_id)
                 status = chat_member.status
@@ -414,8 +431,10 @@ def register_utilities(bot, owner_id):
     @bot.message_handler(commands=["afk"])
     def cmd_afk(message):
         try:
-            if message.chat.type not in ("group", "supergroup") or not module_enabled_for_message(message, "utilities"):
+            if message.chat.type not in ("group", "supergroup"):
                 bot.reply_to(message, "Usa /afk dentro de un grupo.")
+                return
+            if not module_enabled_for_message(message, "utilities"):
                 return
             reason = _arguments(message)[:300]
             con = get_db()

@@ -2,6 +2,8 @@
 import functools
 import logging
 
+import telebot
+
 from flamie.utils.cache import get_bot_id_cached
 
 logger = logging.getLogger(__name__)
@@ -74,3 +76,44 @@ def require_permission(
                 return None
         return wrapped
     return decorate
+
+
+_PERMISSION_FIELDS = (
+    "can_send_audios", "can_send_documents", "can_send_photos", "can_send_videos",
+    "can_send_video_notes", "can_send_voice_notes", "can_send_polls",
+    "can_send_other_messages", "can_add_web_page_previews", "can_change_info",
+    "can_invite_users", "can_pin_messages", "can_manage_topics",
+)
+
+
+def no_permissions():
+    """Silencio total: el usuario no puede enviar ningún tipo de contenido."""
+    return telebot.types.ChatPermissions(
+        can_send_messages=False, can_send_audios=False, can_send_documents=False,
+        can_send_photos=False, can_send_videos=False, can_send_video_notes=False,
+        can_send_voice_notes=False, can_send_polls=False, can_send_other_messages=False,
+        can_add_web_page_previews=False,
+    )
+
+
+def default_unrestrict_permissions(bot, chat_id):
+    """Permisos para quitar una restricción sin saltarse las normas del grupo.
+
+    Parte de los permisos por defecto del chat (los que ve cualquier miembro) y
+    fuerza ``can_send_messages`` porque el objetivo es que el usuario pueda
+    escribir de nuevo. Si Telegram no devuelve esos permisos, concede los de un
+    miembro normal (texto, multimedia, enlaces) pero no los de gestión.
+    """
+    try:
+        defaults = bot.get_chat(chat_id).permissions
+    except Exception:
+        logger.warning("No se pudieron leer los permisos por defecto de %s", chat_id, exc_info=True)
+        defaults = None
+    values = {"can_send_messages": True}
+    if defaults is None:
+        for field in _PERMISSION_FIELDS:
+            values[field] = field not in {"can_change_info", "can_invite_users", "can_pin_messages", "can_manage_topics"}
+    else:
+        for field in _PERMISSION_FIELDS:
+            values[field] = bool(getattr(defaults, field, False))
+    return telebot.types.ChatPermissions(**values)

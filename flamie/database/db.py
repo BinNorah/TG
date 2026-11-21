@@ -209,6 +209,17 @@ def init_db():
                 "INSERT INTO schema_version(singleton,version) VALUES (1,7) "
                 "ON CONFLICT(singleton) DO UPDATE SET version=excluded.version"
             )
+            version = 7
+
+        if version < 8:
+            con.execute("""CREATE TABLE IF NOT EXISTS userbot_chats_iniciados (
+                chat_id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
+            con.execute(
+                "INSERT INTO schema_version(singleton,version) VALUES (1,8) "
+                "ON CONFLICT(singleton) DO UPDATE SET version=excluded.version"
+            )
         con.commit()
     except Exception:
         con.rollback()
@@ -291,6 +302,23 @@ def record_mod_action(chat_id, actor_id, target_user_id, action, reason="", dura
             "VALUES(?,?,?,?,?,?)",
             (chat_id, actor_id, target_user_id, action, reason, duration_seconds),
         )
+        con.commit()
+    finally:
+        con.close()
+
+
+def load_userbot_chats_iniciados():
+    con = get_db()
+    try:
+        return {row[0] for row in con.execute("SELECT chat_id FROM userbot_chats_iniciados")}
+    finally:
+        con.close()
+
+
+def mark_userbot_chat_iniciado(chat_id):
+    con = get_db()
+    try:
+        con.execute("INSERT OR IGNORE INTO userbot_chats_iniciados(chat_id) VALUES(?)", (chat_id,))
         con.commit()
     finally:
         con.close()

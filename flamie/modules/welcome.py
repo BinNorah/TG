@@ -10,8 +10,11 @@ import telebot
 
 from flamie.database.db import get_db
 from flamie.modules.modlog import log_mod_action
-from flamie.modules.settings import _is_admin, get_chat_setting, module_enabled, set_chat_setting
-from flamie.utils.cache import get_bot_id_cached, get_chat_member_cached
+from flamie.modules.settings import (
+    _is_admin, _message_is_admin, ensure_module_for_admin, get_chat_setting, module_enabled,
+    set_chat_setting,
+)
+from flamie.utils.permissions import default_unrestrict_permissions, no_permissions
 
 logger = logging.getLogger(__name__)
 _join_times = defaultdict(deque)
@@ -20,24 +23,14 @@ _sweeper_started = False
 _stop_sweeper = threading.Event()
 
 
-def _permissions(allowed):
-    return telebot.types.ChatPermissions(
-        can_send_messages=allowed,
-        can_send_media_messages=allowed,
-        can_send_audios=allowed,
-        can_send_documents=allowed,
-        can_send_photos=allowed,
-        can_send_videos=allowed,
-        can_send_video_notes=allowed,
-        can_send_voice_notes=allowed,
-        can_send_polls=allowed,
-        can_send_other_messages=allowed,
-        can_add_web_page_previews=allowed,
-    )
+DEFAULT_TEMPLATES = {
+    "welcome_text": "¡Bienvenido, {nombre}, a {grupo}!",
+    "goodbye_text": "{nombre} ha salido de {grupo}. ¡Hasta pronto!",
+}
 
 
-def _format_template(template, user, chat):
-    raw = template or "¡Bienvenido, {nombre}, a {grupo}!"
+def _format_template(template, user, chat, setting="welcome_text"):
+    raw = template or DEFAULT_TEMPLATES.get(setting, DEFAULT_TEMPLATES["welcome_text"])
     safe = html.escape(raw)
     safe = safe.replace("{nombre}", html.escape(user.first_name or "Usuario"))
     safe = safe.replace("{grupo}", html.escape(chat.title or "el grupo"))
@@ -58,7 +51,7 @@ def _join_keyboard(chat_id, user_id, title_key):
 def _send_template(bot, chat, user, setting, button_key):
     try:
         template = get_chat_setting(chat.id, setting, "")
-        text = _format_template(template, user, chat)
+        text = _format_template(template, user, chat, setting)
         bot.send_message(chat.id, text, parse_mode="HTML", reply_markup=_join_keyboard(chat.id, user.id, button_key))
     except Exception:
         logger.exception("No se pudo enviar %s en el chat %s", setting, chat.id)
@@ -90,7 +83,7 @@ def _start_captcha(bot, chat, user):
     restricted = False
     try:
         timeout = max(30, min(900, int(get_chat_setting(chat.id, "captcha_timeout", "60"))))
-        bot.restrict_chat_member(chat.id, user.id, permissions=_permissions(False))
+        bot.restrict_chat_member(chat.id, user.id, permissions=no_permissions())
         restricted = True
         markup = telebot.types.InlineKeyboardMarkup()
         markup.row(telebot.types.InlineKeyboardButton(
@@ -99,7 +92,7 @@ def _start_captcha(bot, chat, user):
         ))
         challenge = bot.send_message(
             chat.id,
-            f"{html.escape(user.first_name or 'Usuario')}, pulsa el botón en {timeout} segundos para poder escribir.",
+            f"{user.first_name or 'Usuario'}, pulsa el botón en {timeout} segundos para poder escribir.",
             reply_markup=markup,
         )
         deadline = int(time.time()) + timeout
@@ -123,7 +116,7 @@ def _start_captcha(bot, chat, user):
                 logger.debug("No se pudo limpiar el captcha incompleto", exc_info=True)
         if restricted:
             try:
-                bot.restrict_chat_member(chat.id, user.id, permissions=_permissions(True))
+                bot.restrict_chat_member(chat.id, user.id, permissions=default_unrestrict_permissions(bot, chat.id))
             except Exception:
                 logger.exception("No se pudo retirar una restricción de captcha incompleta")
 
@@ -177,12 +170,10 @@ def register_welcome(bot, owner_id):
     @bot.message_handler(commands=["setwelcome"])
     def cmd_setwelcome(message):
         try:
-            if message.chat.type == "private" or not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
+            if message.chat.type == "private" or not _message_is_admin(bot, owner_id, message):
                 bot.reply_to(message, "Solo administradores pueden configurar la bienvenida en un grupo.")
                 return
-            if not module_enabled(message.chat.id, "welcome"):
-                bot.reply_to(message, "Activa primero Bienvenida y despedida en /settings.")
-                return
+            ensure_module_for_admin(bot, message, "welcome")
             parts = (message.text or "").partition(" ")[2].split("|")
             template = parts[0].strip()
             button_text = parts[1].strip() if len(parts) > 1 else ""
@@ -206,12 +197,10 @@ def register_welcome(bot, owner_id):
     @bot.message_handler(commands=["setgoodbye"])
     def cmd_setgoodbye(message):
         try:
-            if message.chat.type == "private" or not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
+            if message.chat.type == "private" or not _message_is_admin(bot, owner_id, message):
                 bot.reply_to(message, "Solo administradores pueden configurar la despedida en un grupo.")
                 return
-            if not module_enabled(message.chat.id, "welcome"):
-                bot.reply_to(message, "Activa primero Bienvenida y despedida en /settings.")
-                return
+            ensure_module_for_admin(bot, message, "welcome")
             parts = (message.text or "").partition(" ")[2].split("|")
             template = parts[0].strip()
             button_text = parts[1].strip() if len(parts) > 1 else ""
@@ -235,12 +224,10 @@ def register_welcome(bot, owner_id):
     @bot.message_handler(commands=["captchaconfig"])
     def cmd_captchaconfig(message):
         try:
-            if message.chat.type == "private" or not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
+            if message.chat.type == "private" or not _message_is_admin(bot, owner_id, message):
                 bot.reply_to(message, "Solo administradores pueden configurar el captcha.")
                 return
-            if not module_enabled(message.chat.id, "captcha"):
-                bot.reply_to(message, "Activa primero Captcha de ingreso en /settings.")
-                return
+            ensure_module_for_admin(bot, message, "captcha")
             parts = (message.text or "").split()
             if len(parts) != 2 or not parts[1].isdigit() or not 30 <= int(parts[1]) <= 900:
                 bot.reply_to(message, "Uso: /captchaconfig <segundos 30-900>. El valor inicial es 60.")
@@ -254,7 +241,7 @@ def register_welcome(bot, owner_id):
     @bot.message_handler(commands=["antiraid"])
     def cmd_antiraid(message):
         try:
-            if message.chat.type == "private" or not _is_admin(bot, owner_id, message.chat.id, message.chat.type, message.from_user.id):
+            if message.chat.type == "private" or not _message_is_admin(bot, owner_id, message):
                 bot.reply_to(message, "Solo administradores pueden cambiar el modo antiraid.")
                 return
             value = (message.text or "").partition(" ")[2].strip().lower()
@@ -328,7 +315,7 @@ def register_welcome(bot, owner_id):
             if not row or int(row[0]) <= int(time.time()):
                 bot.answer_callback_query(call.id, "El tiempo de verificación terminó.", show_alert=True)
                 return
-            bot.restrict_chat_member(chat_id, user_id, permissions=_permissions(True))
+            bot.restrict_chat_member(chat_id, user_id, permissions=default_unrestrict_permissions(bot, chat_id))
             con = get_db()
             try:
                 con.execute("DELETE FROM captcha_pending WHERE chat_id=? AND user_id=?", (chat_id, user_id))
@@ -373,7 +360,7 @@ def register_welcome(bot, owner_id):
     @bot.callback_query_handler(func=lambda call: bool(call.data and call.data.startswith("join:")))
     def callback_join_request(call):
         try:
-            action, raw_chat_id, raw_user_id = call.data.split(":", 2)[1:]
+            _, action, raw_chat_id, raw_user_id = call.data.split(":", 3)
             chat_id, user_id = int(raw_chat_id), int(raw_user_id)
             if not _is_admin(bot, owner_id, chat_id, "supergroup", call.from_user.id):
                 bot.answer_callback_query(call.id, "Solo administradores pueden resolver solicitudes.", show_alert=True)

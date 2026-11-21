@@ -19,6 +19,25 @@ def _owner_private(message):
     return bool(message.from_user and message.from_user.id == MI_ID and message.chat.id == MI_ID and message.chat.type == "private")
 
 
+_OWNER_HINT_BOT = None
+
+
+def _owner_gate(message):
+    """True si es el propietario en su chat privado.
+
+    Si el propietario lo escribe en otro sitio, avisa en lugar de ignorarlo; el resto
+    de usuarios no recibe ninguna respuesta (no se revela que el comando existe).
+    """
+    if _owner_private(message):
+        return True
+    if message.from_user and message.from_user.id == MI_ID and _OWNER_HINT_BOT is not None:
+        try:
+            _OWNER_HINT_BOT.reply_to(message, "Este comando solo funciona en tu chat privado con el bot.")
+        except Exception:
+            logger.debug("No se pudo enviar la pista al propietario", exc_info=True)
+    return False
+
+
 def _target_id(message, argument):
     if message.reply_to_message and message.reply_to_message.from_user:
         return int(message.reply_to_message.from_user.id)
@@ -29,10 +48,13 @@ def _target_id(message, argument):
 
 
 def register_owner_tools(bot):
+    global _OWNER_HINT_BOT
+    _OWNER_HINT_BOT = bot
+
     @bot.message_handler(commands=["stats"])
     def cmd_stats(message):
         try:
-            if not _owner_private(message):
+            if not _owner_gate(message):
                 return
             con = get_db()
             try:
@@ -52,7 +74,7 @@ def register_owner_tools(bot):
     def cmd_broadcast(message):
         acquired = False
         try:
-            if not _owner_private(message):
+            if not _owner_gate(message):
                 return
             text = (message.text or "").partition(" ")[2].strip()
             if not text or len(text) > 4000:
@@ -98,7 +120,7 @@ def register_owner_tools(bot):
     @bot.message_handler(commands=["gban"])
     def cmd_gban(message):
         try:
-            if not _owner_private(message):
+            if not _owner_gate(message):
                 return
             argument = (message.text or "").partition(" ")[2].strip()
             try:
@@ -134,7 +156,7 @@ def register_owner_tools(bot):
     @bot.message_handler(commands=["ungban"])
     def cmd_ungban(message):
         try:
-            if not _owner_private(message):
+            if not _owner_gate(message):
                 return
             argument = (message.text or "").partition(" ")[2].strip()
             try:
@@ -165,7 +187,7 @@ def register_owner_tools(bot):
     @bot.message_handler(commands=["backup"])
     def cmd_backup(message):
         try:
-            if not _owner_private(message):
+            if not _owner_gate(message):
                 return
             with tempfile.NamedTemporaryFile(prefix="flamie-backup-", suffix=".db", delete=False) as tmp:
                 backup_path = tmp.name
@@ -191,7 +213,7 @@ def register_owner_tools(bot):
     @bot.message_handler(commands=["maintenance"])
     def cmd_maintenance(message):
         try:
-            if not _owner_private(message):
+            if not _owner_gate(message):
                 return
             value = (message.text or "").partition(" ")[2].strip().lower()
             if value not in {"on", "off", "estado"}:
@@ -208,7 +230,7 @@ def register_owner_tools(bot):
     @bot.message_handler(commands=["grupos"])
     def cmd_groups(message):
         try:
-            if not _owner_private(message):
+            if not _owner_gate(message):
                 return
             con = get_db()
             try:
@@ -229,7 +251,7 @@ def register_owner_tools(bot):
     @bot.message_handler(commands=["logs"])
     def cmd_logs(message):
         try:
-            if not _owner_private(message):
+            if not _owner_gate(message):
                 return
             argument = (message.text or "").partition(" ")[2].strip()
             try:
